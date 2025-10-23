@@ -151,7 +151,6 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
-# --- DIAYN Agent ---
 class DIAYNAgent:
     def __init__(self, state_dim, action_dim, num_skills):
         self.num_skills = num_skills
@@ -224,7 +223,6 @@ class DIAYNAgent:
             critic_loss.backward()
             self.critic_optimizers[z].step()
 
-            # --- Actor ---
             new_action, log_prob, _ = self.executors[z].sample(s_z)
             q1_pi, q2_pi = self.critics[z](s_z, new_action)
             q_min = torch.min(q1_pi, q2_pi)
@@ -242,5 +240,3 @@ class DIAYNAgent:
         return disc_loss_value, per_skill_losses
     
     
-# cái graph thì có phải mình sẽ chia ra 2 node, 1 node là để xử lý text, node còn lại là tool calling à a.
-# cái node tool calling thì sẽ gọi hoặc không tuỳ vào prompt a
