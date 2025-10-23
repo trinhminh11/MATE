@@ -11,3 +11,7 @@ _test*
 .venv
 
 checkpoints/
+
+hitmac/
+
+*.pth

@@ -1,0 +1,23 @@
+import numpy as np
+import torch
+
+ENV_CONFIG = "MATE-8v8-9.yaml"
+NUM_AGENTS = 8
+OBS_DIM = 154
+ACTION_DIM = 2
+NUM_SKILLS = 10
+HIDDEN_DIM = 256
+LEARNING_RATE = 3e-4
+GAMMA = 0.99
+TAU = 0.005
+ALPHA = 0.1
+REPLAY_BUFFER_SIZE = 1_000_000
+BATCH_SIZE = 256
+MAX_TIMESTEPS = 1_000_000
+MAX_EPISODE_STEPS = 200
+LOG_P_Z = -np.log(NUM_SKILLS)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+ROTATION_MAX = 30.0
+ZOOM_MAX = 0.5
+ACTION_SCALE = torch.tensor([ROTATION_MAX, ZOOM_MAX], device=DEVICE)
