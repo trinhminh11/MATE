@@ -729,7 +729,7 @@ class OffPolicyAgent(AgentBase[ObsType, ActType]):
             # count how many episodes finished
             episodes += np.sum(self._last_episode_starts)
 
-        if len(self.memory) >= self.batch_size:
+        if len(self.memory) >= self.batch_size: # if collect enough data, start learning 
             callbacks.on_learn_begin()
             self.learn()
             callbacks.on_learn_end()

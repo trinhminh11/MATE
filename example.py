@@ -18,7 +18,8 @@ def main():
 	camera_agents = GreedyCameraAgent().spawn(env.unwrapped.num_cameras)
 
 	camera_joint_observation, _ = env.reset()
-
+	print(f"Number of agents: {camera_agents}")
+	print(f"Camera observation: {camera_joint_observation.shape}") # 8 x 154
 	mate.group_reset(camera_agents, camera_joint_observation)
 	camera = None
 
@@ -30,6 +31,7 @@ def main():
 			env.unwrapped, camera_agents, camera_joint_observation, camera
 		)
 
+		print(f"Joint action dimension: {camera_joint_action}") # 8 x 2 (agent_number x action_space)
 		results = env.step(camera_joint_action)
 
 		camera_joint_observation, target_team_reward, done, truncated, camera = results

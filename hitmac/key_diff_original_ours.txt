@@ -1,0 +1,14 @@
+The Two Key Differences:
+Shared Decentralized Skill (The "SKILL" box):
+
+In the diagram, the SKILL box takes one state s_t and gives one action a_t.
+
+In our code, the same skill (e.g., self.executors[2]) is given to all 8 agents. It takes 8 different individual observations (s_0, s_1, ...) and produces 8 different actions (a_0, a_1, ...) in a decentralized way.
+
+Individual-State Discriminator (The "DISCRIMINATOR" box):
+
+This is the most important part. We do NOT change the discriminator to take the joint observation.
+
+If we did, it would have to learn to distinguish 4 skills from a massive 1232-dimensional vector (8 agents * 154 obs_dim). This is too hard.
+
+Instead, our Discriminator (as you noted) still only takes one agent's state s_i. We just feed it 8 states one after another and get 8 separate reward signals.
