@@ -10,7 +10,7 @@ MAX_EPISODE_STEPS = 4000
 
 
 def main():
-	base_env = gym.make('MultiAgentTracking-v0', config = "MATE-8v8-9.yaml")
+	base_env = gym.make('MultiAgentTracking-v0', config = "MATE-4v8-9.yaml")
 
 	env = mate.MultiCamera.make(base_env, target_agent=GreedyTargetAgent())
 

@@ -447,6 +447,7 @@ class Viewer:
 
         window = self.fixed_window.copy()
 
+
         for geom in self.onetime_geoms:
             geom.add_transform(self.transform)
             geom.render(window, self.numpy_array)

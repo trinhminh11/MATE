@@ -1013,10 +1013,11 @@ class MultiAgentTracking(gym.Env, EzPickle, metaclass=EnvMeta):
         if self.render_mode not in self.metadata['render.modes']:
             return super().render(mode=self.render_mode)
 
-        import mate.assets.pygletrendering as rendering  # pylint: disable=import-outside-toplevel
+        # import mate.assets.pygletrendering as rendering  # pylint: disable=import-outside-toplevel
+        import mate.assets.pygamerendering as rendering  # pylint: disable=import-outside-toplevel
 
         if self.viewer is None:
-            self.viewer = rendering.Viewer(self.window_size, self.window_size)
+            self.viewer = rendering.Viewer(self.window_size, self.window_size, mode=self.render_mode)
             bound = 1.05 * consts.TERRAIN_SIZE
             self.viewer.set_bounds(-bound, bound, -bound, bound)
 
@@ -1050,15 +1051,15 @@ class MultiAgentTracking(gym.Env, EzPickle, metaclass=EnvMeta):
                 base.attrs[:] = [base.color]
                 base.set_color(*color)
                 image.base = base
-                image.transform = rendering.Transform(translation=warehouse)
-                image.add_attr(image.transform)
+                image.add_transform(rendering.Transform(translation=warehouse))
                 self.viewer.warehouse.append(image)
-                self.viewer.add_geom(image)
+                # self.viewer.add_geom(image)
 
             self.viewer.obstacles = []
             for obstacle in self.obstacles:
                 image = rendering.make_circle(radius=obstacle.radius, res=72, filled=True)
-                image.add_attr(rendering.Transform(translation=obstacle.location))
+                image.add_transform(rendering.Transform(translation=obstacle.location))
+                # image.add_attr(rendering.Transform(translation=obstacle.location))
                 image.set_color(*obstacle.COLOR)
                 self.viewer.obstacles.append(image)
                 self.viewer.add_geom(image)
@@ -1075,11 +1076,12 @@ class MultiAgentTracking(gym.Env, EzPickle, metaclass=EnvMeta):
                 image = rendering.Compound([base, body, lens])
                 for geom in image.gs:
                     geom.attrs[:] = [geom.color]
+                base.set_color(0.1, 0.1, 0.1, 0.75)
                 body.set_color(1.0, 1.0, 1.0, 0.75)
                 lens.set_color(0.1, 0.1, 0.1, 0.75)
                 image.base = base
-                image.transform = rendering.Transform(translation=camera.location)
-                image.add_attr(image.transform)
+                # image.add_attr(image.transform)
+                image.add_transform(rendering.Transform(translation=camera.location))
                 self.viewer.cameras.append(image)
 
             self.viewer.targets = []
@@ -1105,14 +1107,12 @@ class MultiAgentTracking(gym.Env, EzPickle, metaclass=EnvMeta):
                         * np.array([(1.0, 0.0), (0.3, 0.6), (-0.8, 0.6), (-0.8, -0.6), (0.3, -0.6)])
                     )
 
-                image.transform = rendering.Transform(translation=target.location)
-                image.add_attr(image.transform)
+                image.add_transform(rendering.Transform(translation=target.location))
 
                 marker = rendering.make_circle(
                     radius=1.2 * TARGET_RENDER_RADIUS, res=15, filled=True
                 )
-                marker.transform = rendering.Transform(translation=target.location)
-                marker.add_attr(marker.transform)
+                marker.add_transform(rendering.Transform(translation=target.location))
                 marker.set_color(*target.COLOR_TRACKED)
 
                 self.viewer.targets.append(image)
@@ -1125,8 +1125,11 @@ class MultiAgentTracking(gym.Env, EzPickle, metaclass=EnvMeta):
             warehouse = self.viewer.warehouse[w]
             warehouse.gs[-1] = self.viewer.warehouse_images[(remaining, awaiting)]
             warehouse.base.set_color(
-                *warehouse.base.color.vec4[:3], (0.6 if remaining or awaiting else 0.3)
+                *warehouse.base.color[:3], (0.6 if remaining or awaiting else 0.3)
             )
+
+            self.viewer.add_onetime(warehouse)
+
 
         for c, camera in enumerate(self.cameras):
             phis, rhos = camera.boundary_between(
@@ -1146,6 +1149,7 @@ class MultiAgentTracking(gym.Env, EzPickle, metaclass=EnvMeta):
             else:
                 polygon.set_color(0.6, 0.6, 0.0, 0.25)
             sector.set_color(0.0, 0.6, 0.8, 0.1)
+
             self.viewer.add_onetime(sector)
             self.viewer.add_onetime(polygon)
 
@@ -1156,6 +1160,8 @@ class MultiAgentTracking(gym.Env, EzPickle, metaclass=EnvMeta):
                 *(Camera.COLOR_PERCEIVED if perceived_by_targets else Camera.COLOR_UNPERCEIVED)
             )
             image.transform.set_rotation(np.deg2rad(camera.orientation))
+
+
             self.viewer.add_onetime(image)
 
         for t in np.flatnonzero(self.tracked_bits):
@@ -1180,7 +1186,7 @@ class MultiAgentTracking(gym.Env, EzPickle, metaclass=EnvMeta):
             callback(self, self.render_mode)
 
         # pylint: disable-next=superfluous-parens
-        return self.viewer.render(return_rgb_array=(self.render_mode == 'rgb_array'))
+        return self.viewer.render()
 
     def add_render_callback(
         self, name: str, callback: Callable[['MultiAgentTracking', str], None]
