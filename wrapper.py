@@ -8,14 +8,93 @@ from gymnasium import spaces
 
 import numpy as np
 
+class RefinedObs:
+    def __init__(self, preserved, cameras, targets, obstacles, warehouse_include_R=False, target_include_R=False, target_include_loaded=False, expand_preserved_and_obstacle=True):
+        self.preserved = preserved
+        self.cameras = cameras
+        self.targets = targets
+        self.obstacles = obstacles
+
+        self.warehouse_include_R = warehouse_include_R
+        self.target_include_R = target_include_R
+        self.target_include_loaded = target_include_loaded
+        self.expand_preserved_and_obstacle = expand_preserved_and_obstacle
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def items(self):
+        return {
+            "preserved": self.preserved,
+            "cameras": self.cameras,
+            "targets": self.targets,
+            "obstacles": self.obstacles,
+        }.items()
+
+    def keys(self):
+        return ["preserved", "cameras", "targets", "obstacles"]
+
+    def values(self):
+        return [self.preserved, self.cameras, self.targets, self.obstacles]
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+    def __iter__(self):
+        for key in self.keys():
+            yield key, getattr(self, key)
+
+    def __len__(self):
+        return len(self.keys())
+
+    def __contains__(self, key):
+        return key in self.keys()
+
+    @property
+    def description(self):
+
+        if self.warehouse_include_R:
+            preserved_shape_text = "(num_cameras, num_warehouses, 3)"
+            if not self.expand_preserved_and_obstacle:
+                preserved_shape_text = "(num_warehouses, 3)"
+        else:
+            preserved_shape_text = "(num_cameras, num_warehouses, 2)"
+            if not self.expand_preserved_and_obstacle:
+                preserved_shape_text = "(num_warehouses, 2)"
+
+        if self.target_include_R and self.target_include_loaded:
+            target_shape_text = "(num_cameras, num_targets, 5)"
+        elif self.target_include_R or self.target_include_loaded:
+            target_shape_text = "(num_cameras, num_targets, 4)"
+        else:
+            target_shape_text = "(num_cameras, num_targets, 4)"
+
+        if self.expand_preserved_and_obstacle:
+            obstacle_shape_text = "(num_cameras, num_obstacles, 3)"
+        else:
+            obstacle_shape_text = "(num_obstacles, 3)"
+
+
+        return {
+            "preserved": "The preserved state of the environment, including the xy-positions" + (" and radius" if self.warehouse_include_R else "") + " of the warehouses. Shape: " + preserved_shape_text + ".",
+            "cameras": "The state of the camera itself, including normalized {x, y, R, phi, theta, Rmax, phimax, thetamax}. Shape: (num_cameras, 8).",
+            "targets": "The state of the targets, including normalized {x, y, (optionally R, loaded), seen_flag} for each target. Shape: " + target_shape_text + ".",
+            "obstacles": "The state of the obstacles, including normalized x, y, R for each obstacle. Shape: " + obstacle_shape_text + ".",
+        }
+
 class MateCameraDictObsWrapper(ObservationWrapper):
-    def __init__(self, env, warehouse_include_R=False, target_include_R=False, target_include_loaded=False, expand_preserved_and_obstacle=True, see_all_cameras = True, add_flag_if_see_all_cameras = False):
+    def __init__(self, env, warehouse_include_R=False, target_include_R=False, target_include_loaded=False, expand_preserved_and_obstacle=False):
+        """
+        env: the mate environment to wrap
+        warehouse_include_R: whether to include the radius of the warehouse in the preserved state
+        target_include_R: whether to include the radius of the target in the target state
+        target_include_loaded: whether to include the loaded flag of the target in the target state
+        expand_preserved_and_obstacle: whether to expand the preserved and obstacle state to have a separate entry for each camera, or to keep them shared among all cameras (if False, the preserved and obstacle state will be the same for all cameras)
+        """
         super().__init__(env)
         self.target_include_R = target_include_R
         self.target_include_loaded = target_include_loaded
         self.expand_preserved_and_obstacle = expand_preserved_and_obstacle
-        self.see_all_cameras = see_all_cameras
-        self.add_flag_if_see_all_cameras = add_flag_if_see_all_cameras
         self.warehouse_include_R = warehouse_include_R
 
         self.num_cameras = self.unwrapped.num_cameras
@@ -38,15 +117,12 @@ class MateCameraDictObsWrapper(ObservationWrapper):
 
         obstacle_space = spaces.Box(low=-1.0, high=1.0, shape=obstacle_shape, dtype=np.float64)   # x, y, R
 
-        d = 6 if not see_all_cameras or add_flag_if_see_all_cameras else 5
-        teammate_space = spaces.Box(low=-1.0, high=1.0, shape=(self.num_cameras, d*(self.num_cameras-1),), dtype=np.float64)   # x, y, R, phi, theta, (flag)
 
         self.observation_space = spaces.Dict({
             "preserved": preserved_space,
-            "self": self_space,
+            "cameras": self_space,
             "targets": target_space,
             "obstacles": obstacle_space,
-            "teammate": teammate_space,
         })
 
         self.obstacles_state = None
@@ -59,18 +135,28 @@ class MateCameraDictObsWrapper(ObservationWrapper):
         self.obstacles_state = None
         self.preserved_state = None
         obs, info = self.env.reset(seed=seed, options=options)
-        return self.observation(obs), info
+
+        obs = self.observation(obs)
+        return obs, info
 
 
-    def observation(self, obs):
+
+    def observation(self, obs) -> RefinedObs:
         # PRESERVE OBSERVATION NORMALIZATION
         ignore_dim = 4 # Nc, Nt, No, self_state_index
         preserved_dim = self.unwrapped.num_warehouses*2+1
-        offset = 0 if self.warehouse_include_R else -1
         if self.preserved_state is None:
-            self.preserved_state = obs[:, ignore_dim:ignore_dim + preserved_dim + offset] / TERRAIN_SIZE  # (ware_house_x, ware_house_y)*4 (+ warehouse_radius)
+            self.preserved_state = obs[:, ignore_dim:ignore_dim + preserved_dim -1] / TERRAIN_SIZE  # (ware_house_x, ware_house_y)*4
+            warehouse_radious = obs[0, ignore_dim + preserved_dim -1] / TERRAIN_SIZE  # warehouse_radious
+
+            self.preserved_state = self.preserved_state.reshape(self.num_cameras, self.unwrapped.num_warehouses, -1)   # reshape to (num_cameras, preserved_dim)
+
+            if self.warehouse_include_R:
+                self.preserved_state = np.concatenate([self.preserved_state, np.full((self.num_cameras, self.unwrapped.num_warehouses, 1), warehouse_radious)], axis=2)   # add warehouse_radious to preserved state
+
             if not self.expand_preserved_and_obstacle:
                 self.preserved_state = self.preserved_state[0]
+
         ignore_dim += preserved_dim     # increase ignore_dim for camera state
 
         # CAMERA STATE OBSERVATION NORMALIZATION
@@ -103,6 +189,10 @@ class MateCameraDictObsWrapper(ObservationWrapper):
             exclude_indice += np.arange(3, target_state_dim, 5).tolist()    # loaded
 
         target_state = np.delete(target_state, exclude_indice, axis=1)
+
+
+        target_state = target_state.reshape(self.num_cameras, self.unwrapped.num_targets, -1)   # reshape to (num_cameras, num_targets, target_state_dim_per_target)
+
         ignore_dim += target_state_dim   # increase ignore_dim for obstacle state
 
         # OBSTACLE STATE OBSERVATION NORMALIZATION
@@ -115,60 +205,26 @@ class MateCameraDictObsWrapper(ObservationWrapper):
 
             self.obstacles_state /= TERRAIN_SIZE
 
+            self.obstacles_state = self.obstacles_state.reshape(self.unwrapped.num_obstacles, 3)   # reshape to (num_obstacles, 3)
+
             if self.expand_preserved_and_obstacle:
-                self.obstacles_state = np.repeat(self.obstacles_state, self.num_cameras, axis=0)
+                self.obstacles_state = np.repeat(self.obstacles_state[np.newaxis, :, :], self.num_cameras, axis=0)
 
         ignore_dim += self.unwrapped.num_obstacles*4   # x, y, R, flag
 
-        # TEAMMATE STATE OBSERVATION NORMALIZATION
-        if not self.see_all_cameras:
-            teammate_dim = 7 * self.num_cameras   # x, y, r, Rcos, Rsin, theta, flag
-            teammate_state = np.zeros((self.num_cameras, teammate_dim - 7), dtype=np.float64)
 
-            for i in range(self.num_cameras):
-                s: np.ndarray = obs[i, ignore_dim:ignore_dim + teammate_dim]
-                current_indice = np.arange(i * 7, (i + 1) * 7)
-                teammate_state[i] = np.delete(s, current_indice)
+        obs = RefinedObs(
+            preserved=self.preserved_state,
+            cameras=self_state,
+            targets=target_state,
+            obstacles=self.obstacles_state,
+            warehouse_include_R=self.warehouse_include_R,
+            target_include_R=self.target_include_R,
+            target_include_loaded=self.target_include_loaded,
+            expand_preserved_and_obstacle=self.expand_preserved_and_obstacle,
+        )
 
-
-                teammate_state[i, np.arange(0, teammate_dim - 7, 7)] /= TERRAIN_SIZE    # x
-                teammate_state[i, np.arange(1, teammate_dim - 7, 7)] /= TERRAIN_SIZE    # y
-
-                Rcos = teammate_state[i, np.arange(3, teammate_dim - 7, 7)] # Rcos
-                Rsin = teammate_state[i, np.arange(4, teammate_dim - 7, 7)] # Rsin
-                R = np.sqrt(Rcos**2 + Rsin**2) / TERRAIN_SIZE
-                phi = np.arctan2(Rsin, Rcos) / np.pi
-                teammate_state[i, np.arange(3, teammate_dim - 7, 7)] = R    # Rcos -> R
-                teammate_state[i, np.arange(4, teammate_dim - 7, 7)] = phi  # Rsin -> phi
-                teammate_state[i,  np.arange(5, teammate_dim - 7, 7)] = teammate_state[i, np.arange(5, teammate_dim - 7, 7)] / 180  # theta
-
-            r_indice = np.arange(2, teammate_dim - 7, 7)
-            teammate_state = np.delete(teammate_state, r_indice, axis=1)   # remove r -> x, y, R, phi, theta, flag
-        else:
-            d = 6 if self.add_flag_if_see_all_cameras else 5
-            teammate_state = np.zeros((self.num_cameras, d*(self.num_cameras-1)), dtype=np.float64)   # x, y, R, phi, theta, (flag)
-
-            indice = np.ones(self.num_cameras, dtype=np.bool_)
-            for i in range(self.num_cameras):
-                indice[i] = False
-
-                others = self_state[indice, :5]
-                if self.add_flag_if_see_all_cameras:
-                    flags = np.ones((self.num_cameras-1, 1), dtype=np.float64)
-                    others = np.concatenate([others, flags], axis=1)
-
-                teammate_state[i] = others.flatten()
-
-                indice[i] = True
-
-
-        return {
-            "preserved": self.preserved_state,
-            "self": self_state,
-            "targets": target_state,
-            "obstacles": self.obstacles_state,
-            "teammate": teammate_state,
-        }
+        return obs
 
 
 MAX_EPISODE_STEPS = 4000
@@ -180,9 +236,14 @@ def main():
     env: mate.MultiAgentTracking = mate.MultiCamera.make(base_env, target_agent=GreedyTargetAgent())
     env = MateCameraDictObsWrapper(env, expand_preserved_and_obstacle=False)
 
-    print(env.observation_space)
     obs, _ = env.reset()
 
+    for key, value in obs.items():
+        print(key, value.shape)
+
+
+    for key, value in obs.description.items():
+        print(key, value)
     # for _ in range(100):
     #     env.step(np.zeros([env.unwrapped.num_cameras, 2]))
     #     if _ > 50:
