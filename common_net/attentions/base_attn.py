@@ -87,9 +87,9 @@ class AttentionBase(nn.Module):
 
         out = self.post_forward(out)
 
-        if out.shape != V.shape:
+        if out.shape != Q.shape:
             raise ValueError(
-                f"Output shape {out.shape} does not match V shape {V.shape}"
+                f"Output shape {out.shape} does not match Q shape {Q.shape}"
             )
 
         return self.post_forward(out), weights

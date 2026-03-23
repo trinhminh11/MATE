@@ -25,6 +25,35 @@ class ZeroCenteredRMSNorm(nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.eps}"
 
 
+class MLP(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        hidden_dims: None | list[int] = None,
+        bias: bool = True,
+        activation_fn: str = "relu",
+    ):
+        super(MLP, self).__init__()
+
+        if hidden_dims is None:
+            hidden_dims = []
+
+        dims = [input_dim] + hidden_dims + [output_dim]
+
+        layers = []
+
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i + 1], bias=bias))
+            if i < len(dims) - 2:
+                layers.append(get_activation(activation_fn))
+
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class GatedMLP(nn.Module):
     def __init__(
         self,

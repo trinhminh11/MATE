@@ -7,6 +7,8 @@ import torch.nn as nn
 from ..common import Gated, ZeroCenteredRMSNorm
 from .base_attn import AttentionBase, ScaledDotProductAttention
 
+import warnings
+
 
 @dataclass(frozen=True)
 class MHAConfig:
@@ -28,6 +30,7 @@ class MHAConfig:
 
 
 class MultiHeadAttention(nn.Module):
+    """Multi-Head Attention module with support for group query attention and gated attention."""
     def __init__(
         self,
         embed_dim: int,
@@ -125,11 +128,46 @@ class MultiHeadAttention(nn.Module):
 
         self.apply(_init_weights)
 
-    def forward(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, causal=False):
+
+    def expand_3d(self, x: torch.Tensor, name: str) -> torch.Tensor:
+        original_shape = x.shape
+        if x.dim() == 1:
+            warnings.warn(f"{name} is a 1D tensor with shape (E,), automatically unsqueeze to (1, 1, E)")
+
+            return x.unsqueeze(0).unsqueeze(0)
+
+        elif x.dim() == 2:
+            warnings.warn(f"{name} is a 2D tensor with shape (N, E), automatically unsqueeze to (1, N, E)")
+
+            return x.unsqueeze(0)
+
+        elif x.dim() == 3:
+            return x
+
+        else:
+            raise ValueError(
+                f"{name} must be a 3D tensor with shape (B, N, E), 2D tensor with shape (N, E) or 1D tensor with shape (E,), but got shape {original_shape}"
+            )
+
+
+    def forward(self, Q: torch.Tensor, K: Optional[torch.Tensor] = None, V: Optional[torch.Tensor] = None, causal=False):
         # Q: (B, N, E)
         # K: (B, Nkv, E)
         # V: (B, Nkv, E)
+
+        Q = self.expand_3d(Q, "Q")
+        if K is None:
+            K = Q
+        if V is None:
+            V = K
+        K = self.expand_3d(K, "K")
+        V = self.expand_3d(V, "V")
+
         B, N, _ = Q.size()
+        Nkv = K.size(1)
+        if Nkv != (Nv := V.size(1)):
+            raise ValueError(f"Number of key tokens (Nk={Nkv}) must be equal to number of value tokens (Nv={Nv})")
+
         H = self.num_heads
         Hk = self.num_k_heads
         Hv = self.num_v_heads
@@ -143,11 +181,11 @@ class MultiHeadAttention(nn.Module):
         V_proj: torch.Tensor = self.v_proj(V)  # (B, Nkv, Hv * D)
 
         Q_proj = Q_proj.view(B, N, H, D).transpose(1, 2)  # (B, H , N, D)
-        K_proj = K_proj.view(B, N, Hk, D).transpose(1, 2)  # (B, Hk, Nkv, D)
-        V_proj = V_proj.view(B, N, Hv, D).transpose(1, 2)  # (B, Hv, Nkv, D)
+        K_proj = K_proj.view(B, Nkv, Hk, D).transpose(1, 2)  # (B, Hk, Nkv, D)
+        V_proj = V_proj.view(B, Nkv, Hv, D).transpose(1, 2)  # (B, Hv, Nkv, D)
 
-        Q_proj = self.q_norm(Q_proj)
-        K_proj = self.k_norm(K_proj)
+        Q_proj = self.q_norm(Q_proj)    # (B, H, N, D)
+        K_proj = self.k_norm(K_proj)    # (B, Hk, Nkv, D)
 
         # Attention
         attn_out, attn_weights = self.attn(
