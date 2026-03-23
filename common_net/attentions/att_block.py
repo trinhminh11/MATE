@@ -3,10 +3,10 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from .attentions import MHAConfig
-from .attentions import MultiHeadAttention as MHA
-from .common import GatedMLP, ZeroCenteredRMSNorm
-from .moe import MoE, MoEConfig
+from . import MHAConfig
+from . import MultiHeadAttention as MHA
+from ..common import GatedMLP, ZeroCenteredRMSNorm
+from ..moe import MoE, MoEConfig
 
 
 class AttnBlock(nn.Module):
@@ -195,7 +195,7 @@ class CrossMAB(AttnBlock):
 
         out = hidden_states + ff_out  # Residual (B, N, E)
 
-        return out
+        return out, attn_weights
 
 
 class ISAB(AttnBlock):

@@ -61,7 +61,7 @@ class GatedMLP(nn.Module):
         hidden_dim: int,
         output_dim: Optional[int] = None,
         bias: bool = False,
-        gate_act_fn: str = "sigmoid",
+        gate_act_fn: str = "silu",
     ):
         super().__init__()
         output_dim = output_dim if output_dim is not None else input_dim  #

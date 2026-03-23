@@ -12,7 +12,7 @@ import warnings
 
 @dataclass(frozen=True)
 class MHAConfig:
-    num_heads: int = 1
+    num_heads: int = 2
     attn_cls: type[AttentionBase] = ScaledDotProductAttention
     attn_kwargs: Optional[dict] = None
     gated: bool = False
@@ -31,12 +31,14 @@ class MHAConfig:
 
 class MultiHeadAttention(nn.Module):
     """Multi-Head Attention module with support for group query attention and gated attention."""
+
     def __init__(
         self,
         embed_dim: int,
-        config: MHAConfig,
+        config: MHAConfig = MHAConfig(),
     ) -> None:
         super().__init__()
+
         self.embed_dim = embed_dim
         self.num_heads = config.num_heads
         self.num_k_heads = (
@@ -128,16 +130,19 @@ class MultiHeadAttention(nn.Module):
 
         self.apply(_init_weights)
 
-
     def expand_3d(self, x: torch.Tensor, name: str) -> torch.Tensor:
         original_shape = x.shape
         if x.dim() == 1:
-            warnings.warn(f"{name} is a 1D tensor with shape (E,), automatically unsqueeze to (1, 1, E)")
+            warnings.warn(
+                f"{name} is a 1D tensor with shape (E,), automatically unsqueeze to (1, 1, E)"
+            )
 
             return x.unsqueeze(0).unsqueeze(0)
 
         elif x.dim() == 2:
-            warnings.warn(f"{name} is a 2D tensor with shape (N, E), automatically unsqueeze to (1, N, E)")
+            warnings.warn(
+                f"{name} is a 2D tensor with shape (N, E), automatically unsqueeze to (1, N, E)"
+            )
 
             return x.unsqueeze(0)
 
@@ -149,8 +154,13 @@ class MultiHeadAttention(nn.Module):
                 f"{name} must be a 3D tensor with shape (B, N, E), 2D tensor with shape (N, E) or 1D tensor with shape (E,), but got shape {original_shape}"
             )
 
-
-    def forward(self, Q: torch.Tensor, K: Optional[torch.Tensor] = None, V: Optional[torch.Tensor] = None, causal=False):
+    def forward(
+        self,
+        Q: torch.Tensor,
+        K: Optional[torch.Tensor] = None,
+        V: Optional[torch.Tensor] = None,
+        causal=False,
+    ):
         # Q: (B, N, E)
         # K: (B, Nkv, E)
         # V: (B, Nkv, E)
@@ -163,10 +173,18 @@ class MultiHeadAttention(nn.Module):
         K = self.expand_3d(K, "K")
         V = self.expand_3d(V, "V")
 
-        B, N, _ = Q.size()
+        if Q.size(0) != K.size(0) or Q.size(0) != V.size(0):
+            raise ValueError(
+                f"Batch size of Q, K and V must be the same, but got {Q.size(0)}, {K.size(0)}, {V.size(0)}"
+            )
+
         Nkv = K.size(1)
         if Nkv != (Nv := V.size(1)):
-            raise ValueError(f"Number of key tokens (Nk={Nkv}) must be equal to number of value tokens (Nv={Nv})")
+            raise ValueError(
+                f"Number of key tokens (Nk={Nkv}) must be equal to number of value tokens (Nv={Nv})"
+            )
+
+        B, N, _ = Q.size()
 
         H = self.num_heads
         Hk = self.num_k_heads
@@ -184,8 +202,12 @@ class MultiHeadAttention(nn.Module):
         K_proj = K_proj.view(B, Nkv, Hk, D).transpose(1, 2)  # (B, Hk, Nkv, D)
         V_proj = V_proj.view(B, Nkv, Hv, D).transpose(1, 2)  # (B, Hv, Nkv, D)
 
-        Q_proj = self.q_norm(Q_proj)    # (B, H, N, D)
-        K_proj = self.k_norm(K_proj)    # (B, Hk, Nkv, D)
+        Q_proj = self.q_norm(Q_proj)  # (B, H, N, D)
+        K_proj = self.k_norm(K_proj)  # (B, Hk, Nkv, D)
+
+        print("Q_proj", Q_proj.shape)
+        print("K_proj", K_proj.shape)
+        print("V_proj", V_proj.shape)
 
         # Attention
         attn_out, attn_weights = self.attn(
@@ -203,3 +225,63 @@ class MultiHeadAttention(nn.Module):
 
         out = self.out_proj(attn_out)  # (B, N, E)
         return out, attn_weights
+
+
+class MultiHeadLatentAttention(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        q_latent_dim: int | None = None,
+        kv_latent_dim: int | None = None,
+        config: MHAConfig = MHAConfig(),
+    ) -> None:
+        super().__init__()
+
+        if q_latent_dim is None:
+            self.q_latent_dim = embed_dim // 8
+        if kv_latent_dim is None:
+            self.kv_latent_dim = embed_dim // 16
+
+        self.config = config
+
+        head_dim = embed_dim // config.num_heads
+
+        self.Wq_d = nn.Linear(embed_dim, self.q_latent_dim, bias=config.bias)
+        self.W_qk = nn.Linear(self.q_latent_dim, config.num_heads * self.kv_latent_dim, bias=config.bias)
+
+        self.Wkv_d = nn.Linear(embed_dim, self.kv_latent_dim, bias=config.bias)
+        self.Wv_u = nn.Linear(self.kv_latent_dim, config.num_heads * head_dim, bias=config.bias)
+
+        self.Wo = nn.Linear(config.num_heads * head_dim, embed_dim, bias=config.bias)
+
+
+
+    def forward(
+        self,
+        Q: torch.Tensor,
+        K: Optional[torch.Tensor] = None,
+        V: Optional[torch.Tensor] = None,
+        causal=False,
+    ):
+        # Q: (B, N, E)
+        # K: (B, Nkv, E)
+        # V: (B, Nkv, E)
+
+        B, N, _ = Q.size()
+        Nkv = K.size(1)
+
+        C_q = self.Wq_d(Q)  # (B, N, q_latent_dim)
+        C_kv = self.Wkv_d(K)  # (B, Nkv, kv_latent_dim)
+
+        C_qW_qk = self.W_qk(C_q)  # (B, N, H*kv_latent_dim)
+        C_qW_qk = C_qW_qk.view(B, N, self.config.num_heads, -1).transpose(1, 2)  # (B, H, N, kv_latent_dim)
+
+        scores = torch.matmul(C_qW_qk.transpose(1, 2), C_kv.transpose(-2, -1)[:, None, ...]) / (self.kv_latent_dim ** 0.5)  # (B, H, N, Nkv)
+
+        attn_weights = torch.softmax(scores, dim=-1)  # (B, H, N, Nkv)
+
+        V_out = self.Wv_u(C_kv).view(B, Nkv, self.config.num_heads, -1).transpose(1, 2)  # (B, H, Nkv, head_dim)
+
+        output = torch.matmul(attn_weights, V_out.transpose(1, 2)).transpose(1, 2).contiguous().view(B, N, -1)  # (B, H, N, head_dim) -> (B, N, H*head_dim)
+
+        return output
