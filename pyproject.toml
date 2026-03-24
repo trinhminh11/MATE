@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = "==3.13.0"
 dependencies = [
     "swig>=4.3.1.post0",
-    "dacite>=1.9.2",
     "gymnasium[box2d]>=1.2.0",
     "jupyter>=1.1.1",
     "matplotlib>=3.10.6",
@@ -19,7 +18,19 @@ dependencies = [
     "stable-baselines3>=2.7.0",
     "swig>=4.3.1.post0",
     "tensorboard>=2.20.0",
-    "torch>=2.8.0",
     "torchinfo>=1.8.0",
     "tqdm>=4.67.1",
+    "torch-summary>=1.4.5",
+    "torch>=2.10.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
