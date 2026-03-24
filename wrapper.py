@@ -1,15 +1,16 @@
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 import gymnasium as gym
 import numpy as np
 from gymnasium import ObservationWrapper, spaces
 
 import mate
-from agents import GreedyCameraAgent as GreedyCameraAgent
+from agents import GreedyCameraAgent
 from mate.agents import GreedyTargetAgent
 from mate.constants import TERRAIN_SIZE
 from mate.entities import Obstacle
 from mate.wrappers import MultiCamera
+
 
 from agents.base import GoalsBaseAgent
 
@@ -44,19 +45,8 @@ class MateCameraDictObs:
 
         self.num_cameras = self.env.unwrapped.num_cameras
 
-        warehouses_shape = self.env.unwrapped.num_warehouses * 2 + (
-            1 if warehouse_include_R else 0
-        )
-        warehouses_shape = (
-            (self.num_cameras, warehouses_shape)
-            if expand_warehouses_and_obstacle
-            else (warehouses_shape,)
-        )
 
-        warehouses_space = spaces.Box(
-            low=-1.0, high=1.0, shape=warehouses_shape, dtype=np.float64
-        )
-        self_space = spaces.Box(
+        cameras_space = spaces.Box(
             low=-1.0, high=1.0, shape=(self.num_cameras, 8), dtype=np.float64
         )  # x, y, R, phi, theta, Rmax, phimax, thetamax
 
@@ -70,28 +60,41 @@ class MateCameraDictObs:
             high=1.0,
             shape=(
                 self.num_cameras,
-                self.env.unwrapped.num_targets * target_dim,
+                self.env.unwrapped.num_targets,
+                target_dim,
             ),
             dtype=np.float64,
         )
 
-        obstacle_shape = self.env.unwrapped.num_obstacles * 3
+        obstacle_shape = (self.env.unwrapped.num_obstacles, 3)
         obstacle_shape = (
-            (self.num_cameras, obstacle_shape)
+            (self.num_cameras, *obstacle_shape)
             if expand_warehouses_and_obstacle
-            else (obstacle_shape,)
+            else obstacle_shape
         )
 
         obstacle_space = spaces.Box(
             low=-1.0, high=1.0, shape=obstacle_shape, dtype=np.float64
         )  # x, y, R
 
+        warehouses_shape = (self.env.unwrapped.num_warehouses, 2 + (1 if warehouse_include_R else 0))
+
+        warehouses_shape = (
+            (self.num_cameras, *warehouses_shape)
+            if expand_warehouses_and_obstacle
+            else warehouses_shape
+        )
+
+        warehouses_space = spaces.Box(
+            low=-1.0, high=1.0, shape=warehouses_shape, dtype=np.float64
+        )
+
         self.observation_space = spaces.Dict(
             {
-                "warehouses": warehouses_space,
-                "cameras": self_space,
+                "cameras": cameras_space,
                 "targets": target_space,
                 "obstacles": obstacle_space,
+                "warehouses": warehouses_space,
             }
         )
 
@@ -327,18 +330,20 @@ def combine_targets(targets_list: np.ndarray):
 
 class AgentAsActionWrapper(gym.Wrapper):
     env: MultiCamera
-    def __init__(self, env: MultiCamera, agents: list[GoalsBaseAgent]):
+    def __init__(self, env: MultiCamera, agents: list[GoalsBaseAgent], warehouse_include_R=False, target_include_R=False, target_include_loaded=False, expand_warehouses_and_obstacle=False):
         super().__init__(env)
         self.agents = agents
 
-        self.refined_observator = MateCameraDictObs(env)
+        self.refined_observator = MateCameraDictObs(env, warehouse_include_R=warehouse_include_R, target_include_R=target_include_R, target_include_loaded=target_include_loaded, expand_warehouses_and_obstacle=expand_warehouses_and_obstacle)
 
         self.obs = None
         self.refined_obs = None
         self.info = None
 
+        self.observation_space = self.refined_observator.observation_space
+        self.action_space = spaces.MultiBinary((self.env.unwrapped.num_cameras, self.env.unwrapped.num_targets))  # each camera can choose to have a goal for each target or not, action is a binary vector of shape (num_cameras * num_targets), where each entry is 1 if the corresponding camera has a goal for the corresponding target, and 0 otherwise
+
     def reset(self, **kwargs):
-        print(self.env)
         obs, info = self.env.reset(**kwargs)
         self.info = None
 
@@ -384,22 +389,163 @@ class AgentAsActionWrapper(gym.Wrapper):
         self.info = info
         return self.refined_obs, reward, done, truncated, info
 
+
+class NetWrapper(gym.Wrapper):
+    env: AgentAsActionWrapper
+    def __init__(self, env: AgentAsActionWrapper, skip=16, reward_type: Literal["default", "coverage_rate"]='coverage_rate', with_render: bool = False):
+        super().__init__(env)
+        self.skip = skip
+        self.reward_type = reward_type
+        self.with_render = with_render
+
+        self.num_cameras = self.env.unwrapped.num_cameras
+        self.num_targets = self.env.unwrapped.num_targets
+
+        observation_space = self.env.refined_observator.observation_space
+
+        self.cameras_history_space = (self.skip, *observation_space['cameras'].shape)
+        self.targets_history_space = (self.skip, *observation_space['targets'].shape[1:])
+
+        self.cameras_history = np.ndarray(self.cameras_history_space, dtype=np.float64)
+        self.targets_history = np.ndarray(self.targets_history_space, dtype=np.float64)
+
+        self.obstacles = None
+        self.warehouses = None
+
+
+        self.observation_space = spaces.Dict(
+            {
+                "cameras": spaces.Box(
+                    low=-1.0,
+                    high=1.0,
+                    shape=(
+                        self.num_cameras,
+                        self.skip * observation_space['cameras'].shape[-1],
+                    ),
+                    dtype=np.float64,
+                ),
+                "targets": spaces.Box(
+                    low=-1.0,
+                    high=1.0,
+                    shape=(
+                        self.num_targets,
+                        self.skip * observation_space['targets'].shape[-1],
+                    ),
+                    dtype=np.float64,
+                ),
+                "obstacles": observation_space['obstacles'],
+                "warehouses": observation_space['warehouses'],
+            }
+        )
+
+        self.action_space = self.env.action_space
+
+    @classmethod
+    def preprocess_history(
+        self,
+        cameras_history: np.ndarray,
+        targets_history: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        # cameras_history: (history_len, num_cameras, camera_state_dim)
+        # targets_history: (history_len, num_targets, target_state_dim)
+
+
+        n_cameras = cameras_history.shape[1]
+        n_targets = targets_history.shape[1]
+
+        # Permute to (num_cameras, history_len, camera_state_dim) and flatten history
+        cameras_history = cameras_history.transpose(1, 0, 2).reshape(n_cameras, -1)  # (num_cameras, history_len * camera_state_dim)
+        targets_history = targets_history.transpose(1, 0, 2).reshape(n_targets, -1)  # (num_targets, history_len * target_state_dim)
+
+        return cameras_history, targets_history
+
+    def run_skip(self, goals: list[list[bool]]):
+        total_reward = 0
+
+        for _ in range(self.skip):
+            obs, reward, done, truncated, info = self.env.step(goals)
+            if self.reward_type == 'coverage_rate':
+                reward = info[0]['coverage_rate']
+
+            self.cameras_history = np.roll(self.cameras_history, shift=-1, axis=0)
+            self.cameras_history[-1] = obs['cameras']
+            self.targets_history = np.roll(self.targets_history, shift=-1, axis=0)
+            self.targets_history[-1] = combine_targets(obs['targets'])
+            total_reward += reward
+
+            if self.with_render:
+                run = self.env.render()
+                if not run:
+                    break
+
+            if done or truncated:
+                break
+
+        final_reward = total_reward
+        final_reward = total_reward / self.skip # mean or total?
+
+        return final_reward, done, truncated, info
+
+    def reset(self, *, seed = None, options = None):
+        self.cameras_history = np.ndarray(self.cameras_history_space, dtype=np.float64)
+        self.targets_history = np.ndarray(self.targets_history_space, dtype=np.float64)
+        self.obstacles = None
+        self.warehouses = None
+
+        obs, info = self.env.reset(seed=seed, options=options)
+        self.cameras_history[-1] = obs['cameras']
+        self.targets_history[-1] = combine_targets(obs['targets'])
+
+        # run skip first to get history
+        _, _, _, info = self.run_skip(goals=[[True] * self.num_targets] * self.num_cameras)
+
+        flatten_cameras_history, flatten_targets_history = self.preprocess_history(self.cameras_history, self.targets_history)
+        self.obstacles = obs['obstacles']
+        self.warehouses = obs['warehouses']
+
+        obs = {
+            'cameras': flatten_cameras_history,
+            'targets': flatten_targets_history,
+            'obstacles': self.obstacles,
+            'warehouses': self.warehouses,
+        }
+
+        return obs, info
+
+    def step(self, action):
+        final_reward, done, truncated, info = self.run_skip(action)
+
+        flatten_cameras_history, flatten_targets_history = self.preprocess_history(self.cameras_history, self.targets_history)
+
+        obs = {
+            'cameras': flatten_cameras_history,
+            'targets': flatten_targets_history,
+            'obstacles': self.obstacles,
+            'warehouses': self.warehouses,
+        }
+
+        print(final_reward)
+
+        return obs, final_reward, done, truncated, info
+
 def main():
     from net import Net, torch
 
     base_env = gym.make('MultiAgentTracking-v0', config = "MATE-4v8-9.yaml")
     env = mate.MultiCamera.make(base_env, target_agent=GreedyTargetAgent())
 
-    env = AgentAsActionWrapper(env, GreedyCameraAgent().spawn(env.unwrapped.num_cameras))
+    env = NetWrapper(AgentAsActionWrapper(env, GreedyCameraAgent().spawn(env.unwrapped.num_cameras)), reward_type='coverage_rate')
 
     test = Net()
 
     camera_joint_observation, _ = env.reset()
     goals = [[True] * env.unwrapped.num_targets] * env.unwrapped.num_cameras
 
-    for i in range(1000):
+    reward = 0
+    for i in range(40000):
         camera_joint_observation, target_team_reward, done, truncated, info = env.step(goals)
 
+        reward += target_team_reward
         run = env.render()
         if not run or done:
             env.close()

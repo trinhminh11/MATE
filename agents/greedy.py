@@ -8,7 +8,7 @@ from mate.agents.utils import TargetStatePublic
 from .base import GoalsBaseAgent
 
 
-__all__ = ['GreedyCameraAgent', 'GreedyTargetAgent']
+__all__ = ['GreedyCameraAgent']
 
 
 class GreedyCameraAgent(GoalsBaseAgent):  # pylint: disable=too-many-instance-attributes
