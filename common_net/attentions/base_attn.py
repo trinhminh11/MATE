@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import math
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -140,7 +141,7 @@ class ScaledDotProductAttention(AttentionBase):
         if causal:
             raise NotImplementedError("Causal attention is not implemented yet")
         else:
-            scaling = float(D) ** -0.5
+            scaling = 1/math.sqrt(D)
 
             attn_weights = (
                 torch.matmul(

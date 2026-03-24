@@ -8,6 +8,7 @@ from ..common import Gated, ZeroCenteredRMSNorm
 from .base_attn import AttentionBase, ScaledDotProductAttention
 
 import warnings
+import math
 
 
 @dataclass(frozen=True)
@@ -205,10 +206,6 @@ class MultiHeadAttention(nn.Module):
         Q_proj = self.q_norm(Q_proj)  # (B, H, N, D)
         K_proj = self.k_norm(K_proj)  # (B, Hk, Nkv, D)
 
-        print("Q_proj", Q_proj.shape)
-        print("K_proj", K_proj.shape)
-        print("V_proj", V_proj.shape)
-
         # Attention
         attn_out, attn_weights = self.attn(
             Q_proj, K_proj, V_proj, causal=causal
@@ -276,7 +273,7 @@ class MultiHeadLatentAttention(nn.Module):
         C_qW_qk = self.W_qk(C_q)  # (B, N, H*kv_latent_dim)
         C_qW_qk = C_qW_qk.view(B, N, self.config.num_heads, -1).transpose(1, 2)  # (B, H, N, kv_latent_dim)
 
-        scores = torch.matmul(C_qW_qk.transpose(1, 2), C_kv.transpose(-2, -1)[:, None, ...]) / (self.kv_latent_dim ** 0.5)  # (B, H, N, Nkv)
+        scores = torch.matmul(C_qW_qk.transpose(1, 2), C_kv.transpose(-2, -1)[:, None, ...]) / (math.sqrt(self.kv_latent_dim))  # (B, H, N, Nkv)
 
         attn_weights = torch.softmax(scores, dim=-1)  # (B, H, N, Nkv)
 
