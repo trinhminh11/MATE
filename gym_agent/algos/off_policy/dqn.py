@@ -74,6 +74,11 @@ class DQN(OffPolicyAgent):
         else:
             eps = self.eps
 
+        if isinstance(state, dict):
+            batch_size = next(iter(state.values())).shape[0]
+        else:
+            batch_size = state.shape[0]
+
         # Epsilon-greedy action selection
         if random.random() >= eps:
             # Convert state to tensor and move to the appropriate device
@@ -96,10 +101,10 @@ class DQN(OffPolicyAgent):
             # Return a random action from the action space
             if isinstance(self.action_space, spaces.MultiBinary):
                 return np.random.randint(
-                    2, size=(state.shape[0], self.action_space.n)
+                    2, size=(batch_size, self.action_space.n) if isinstance(self.action_space.n, int) else (batch_size, *self.action_space.n)
                 )  # for MultiBinary, we need to sample each binary action separately
             return np.array(
-                [self.envs.single_action_space.sample() for _ in range(state.shape[0])]
+                [self.envs.single_action_space.sample() for _ in range(batch_size)]
             )
 
     def learn(self):
@@ -116,7 +121,13 @@ class DQN(OffPolicyAgent):
             self.policy.target_forward(next_observations).detach().max(1)[0]
         )
         # Compute the Q targets for the current states
-        q_targets: Tensor = rewards + (self.gamma * q_targets_next * (~terminals))
+        try:
+            q_targets: Tensor = rewards + (self.gamma * q_targets_next * (~terminals))
+        except Exception as e:
+            print(rewards.shape)
+            print(q_targets_next.shape)
+            print(terminals.shape)
+            raise e
 
         # Get the expected Q values from the local model
         q_expected: Tensor = self.policy.forward(observations)

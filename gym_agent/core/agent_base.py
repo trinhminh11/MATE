@@ -238,7 +238,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         self.name = self.__class__.__name__
 
-        self.env = env
+        self.env_func = env
 
         env_kwargs = config.env_kwargs or {}
 
@@ -246,12 +246,12 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         self.env_kwargs = env_kwargs
 
-        if isinstance(self.env, str):
-            env_factory_fn = lambda **kwargs: make(self.env, **kwargs)  # noqa: E731
+        if isinstance(self.env_func, str):
+            env_factory_fn = lambda **kwargs: make(self.env_func, **kwargs)  # noqa: E731
 
 
-        elif callable(self.env):
-            env_factory_fn = self.env
+        elif callable(self.env_func):
+            env_factory_fn = self.env_func
         else:
             raise ValueError(
                 "env must be a string or a callable function that returns an environment instance. currently not implemented for custom environments."
@@ -443,7 +443,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         policy_info = self.policy.save_info()
         save_info = {
             "config": {
-                "env": self.env,
+                "env": self.env_func,
                 "config_class": f"{self.config.__class__.__module__}.{self.config.__class__.__qualname__}",
             }
             | asdict(self.config),
@@ -702,7 +702,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         save_dir: Path = (
             Path(save_dir)
-            / self.env
+            / self.envs.env_id
             / self.name
             / train_begin.strftime("%Y-%m-%d_%H-%M-%S")
         )
@@ -710,7 +710,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         log_dir: Path = (
             Path(log_dir)
-            / self.env
+            / self.envs.env_id
             / self.name
             / train_begin.strftime("%Y-%m-%d_%H-%M-%S")
         )
@@ -1186,7 +1186,7 @@ class ActorCriticPolicyAgent(AgentBase[ObsType, ActType]):
 
             with torch.no_grad():
                 action_logits, value_logits = self.policy.forward(
-                    utils.to_torch(self._last_obs, self.device)
+                    utils.to_torch(self._last_obs, self.device, torch.float32)
                 )
 
                 distribution = self.distribution(action_logits)
@@ -1229,7 +1229,7 @@ class ActorCriticPolicyAgent(AgentBase[ObsType, ActType]):
         # compute the value of the last observation
         with torch.no_grad():
             values = (
-                self.policy.forward_critic(utils.to_torch(self._last_obs, self.device))
+                self.policy.forward_critic(utils.to_torch(self._last_obs, self.device, torch.float32))
                 .squeeze(-1)
                 .cpu()
                 .numpy()

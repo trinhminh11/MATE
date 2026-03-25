@@ -95,7 +95,7 @@ class A2C(ActorCriticPolicyAgent):
 
     def predict(self, state: ObsType, deterministic: bool = True) -> ActType:
         action_logits = self.policy.forward_actor(
-            to_torch(state, self.device).float()
+            to_torch(state, self.device, torch.float32)
         )  # Shape or dict of Shape: (num_envs, action_dim) or (num_envs, n_actions)
 
         dist = self.distribution(action_logits)

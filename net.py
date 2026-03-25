@@ -127,8 +127,7 @@ class EncoderNet(nn.Module):
 
         return cam_emb
 
-
-class Net(nn.Module):
+class FeatureExtractor(nn.Module):
     def __init__(
         self,
         camera_dim: int = 8 * 8,  # default of 8 history
@@ -158,32 +157,7 @@ class Net(nn.Module):
             mha_config=mha_config,
         )  # from C x embed_dim, T x embed_dim, O x embed_dim, W x embed_dim -> C x embed_dim
 
-        self.goals_generator = GoalsGenerator(
-            embed_dim=embed_dim
-        )  # from C x embed_dim, T x embed_dim -> C x T
 
-    @classmethod
-    def preprocess_history(
-        self,
-        cameras_history: torch.Tensor | np.ndarray,
-        targets_history: torch.Tensor | np.ndarray,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # cameras_history: (history_len, num_cameras, camera_state_dim)
-        # targets_history: (history_len, num_targets, target_state_dim)
-
-        if isinstance(cameras_history, np.ndarray):
-            cameras_history = torch.tensor(cameras_history, dtype=torch.float32)
-        if isinstance(targets_history, np.ndarray):
-            targets_history = torch.tensor(targets_history, dtype=torch.float32)
-
-        n_cameras = cameras_history.shape[1]
-        n_targets = targets_history.shape[1]
-
-        # Permute to (num_cameras, history_len, camera_state_dim) and flatten history
-        cameras_history = cameras_history.permute(1, 0, 2).reshape(n_cameras, -1)  # (num_cameras, history_len * camera_state_dim)
-        targets_history = targets_history.permute(1, 0, 2).reshape(n_targets, -1)  # (num_targets, history_len * target_state_dim)
-
-        return cameras_history, targets_history
 
     def forward(
         self,
@@ -201,7 +175,52 @@ class Net(nn.Module):
 
         out = self.encoder(cam_emb, tar_emb, obs_emb, wh_emb)  # B x C x embed_dim
 
-        goals = self.goals_generator(out, tar_emb)  # B x C x T
+        return out
+
+class Net(nn.Module):
+    def __init__(
+        self,
+        camera_dim: int = 8 * 8,  # default of 8 history
+        target_dim: int = 3 * 8,  # default of 8 history
+        obstacle_dim: int = 3,
+        warehouse_dim: int = 2,
+        n_linear_attn_blocks: int = 0,
+        n_attn_blocks: int = 3,
+        embed_dim: int = 64,
+        mha_config: MHAConfig = MHAConfig(num_heads=1),
+    ):
+        super().__init__()
+        self.feature_extractor = FeatureExtractor(
+            camera_dim=camera_dim,
+            target_dim=target_dim,
+            obstacle_dim=obstacle_dim,
+            warehouse_dim=warehouse_dim,
+            n_linear_attn_blocks=n_linear_attn_blocks,
+            n_attn_blocks=n_attn_blocks,
+            embed_dim=embed_dim,
+            mha_config=mha_config,
+        )
+
+        self.targets_mlp = MLP(input_dim=target_dim, output_dim=embed_dim, hidden_dims=[embed_dim * 2, embed_dim*2])
+
+        self.goals_generator = GoalsGenerator(
+            embed_dim=embed_dim
+        )  # from C x embed_dim, T x embed_dim -> C x T
+
+    def forward(
+        self,
+        X: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        # cameras: B x C x camera_dim
+        # Targets: B x T x target_dim
+        # obstacles: B x O x obstacle_dim
+        # warehouses: B x W x warehouse_dim
+
+        features = self.feature_extractor(X)  # B x C x embed_dim
+
+        tar_emb = self.targets_mlp(X['targets'])  # B x T x embed_dim
+
+        goals = self.goals_generator(features, tar_emb)  # B x C x T
 
         return goals
 

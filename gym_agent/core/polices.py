@@ -126,8 +126,8 @@ class ActorCriticPolicy(BasePolicy):
         actor_factory_func: Callable[..., nn.Module],
         critic_factory_func: Callable[..., nn.Module],
         actor_lr: float,
-        shared_optimizer: bool = True,
         critic_lr: Optional[float] = None,
+        shared_optimizer: bool = False,
         feature_extractor_func: Optional[Callable[..., nn.Module]] = None,
         optim_cls: type[optim.Optimizer] = optim.Adam,
         optim_kwargs: Optional[dict] = None,
@@ -144,8 +144,8 @@ class ActorCriticPolicy(BasePolicy):
             critic_factory_func (Callable[..., nn.Module]): Factory function to create the critic network.
             actor_lr (float): Learning rate for the actor network.
             critic_lr (float, optional): Learning rate for the critic network. If None, defaults to actor_lr.
-            feature_extractor_func (Callable[..., nn.Module], optional): Factory function to create the feature extractor. If None, use Identity.
-            shared_feature_extractor (bool): flag to share feature extractor or not. Defaults to True
+            shared_optimizer (bool, optional): If True, use a single optimizer for both actor and critic. Defaults to False.
+            feature_extractor_func (Callable[..., nn.Module], optional): Factory function to create the feature extractor. If None, use Identity. If not None, the feature extractor will be shared between actor and critic.
             optim_cls (type[optim.Optimizer], optional): Optimizer class to use. Defaults to Adam.
             optim_kwargs (dict, optional): Additional keyword arguments for optimizer initialization.
             lr_scheduler_cls (type[optim.lr_scheduler._LRScheduler], optional): Learning rate scheduler class.
@@ -218,7 +218,7 @@ class ActorCriticPolicy(BasePolicy):
         """ Forward pass through the actor and critic networks.
 
         Args:
-            x (torch.Tensor): Input tensor.              
+            x (torch.Tensor): Input tensor.
             tuple[torch.Tensor, torch.Tensor]: Action logits and value logits.
         """
         features = self.extract_features(x)
