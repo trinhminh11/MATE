@@ -555,16 +555,19 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
     @classmethod
     def from_checkpoint(
         cls,
-        env: str,
+        env_id: str,
         policy: BasePolicy,
-        path: Path | str,
+        path: Path | str = "./checkpoints",
         model_version: str = "last",
     ):
         """Create an agent from a checkpoint.
 
         Args:
+            env_id (str): The environment ID to create the agent for.
+            policy (BasePolicy): The policy to use for the agent.
             path (Path | str): The directory to load the file from.
-            *post_names: Additional strings to append to the filename.
+            model_version (str, optional): The version of the model to load. Defaults to "last".
+
 
         Returns:
             cls: The created agent.
@@ -573,7 +576,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         path = Path(path)
 
         load_file = auto_find_path(
-            path, env=env, name=cls.__name__, model_version=model_version
+            path, env=env_id, name=cls.__name__, model_version=model_version
         )
 
         # TODO: add logging
@@ -592,14 +595,14 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
             # loading configuration from yaml:
             config_env, config = cls.load_config(load_dir)
-            if config_env != env:
+            if config_env != env_id:
                 warnings.warn(
-                    f"Warning: env in config ({config_env}) does not match the provided env ({env}). Using the config env."
+                    f"Warning: env in config ({config_env}) does not match the provided env ({env_id}). Using the config env."
                 )
-                env = config_env
+                env_id = config_env
 
             # Create the agent instance
-            agent = cls(env=env, policy=policy, config=config)
+            agent = cls(env=env_id, policy=policy, config=config)
             # Load the model parameters
             agent.load_model(load_dir)
 
