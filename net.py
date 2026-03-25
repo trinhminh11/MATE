@@ -1,4 +1,3 @@
-import math
 from dataclasses import replace
 
 import numpy as np
@@ -20,8 +19,8 @@ class GoalsGenerator(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
 
-        self.q_proj = MLP(input_dim=embed_dim, output_dim=embed_dim, hidden_dims=[])
-        self.k_proj = MLP(input_dim=embed_dim, output_dim=embed_dim, hidden_dims=[])
+        self.q_proj = MLP(input_dim=embed_dim, output_dim=embed_dim, hidden_dims=[embed_dim * 2, embed_dim*2])
+        self.k_proj = MLP(input_dim=embed_dim, output_dim=embed_dim, hidden_dims=[embed_dim * 2, embed_dim*2])
 
         self.q_norm = ZeroCenteredRMSNorm(embed_dim)
         self.k_norm = ZeroCenteredRMSNorm(embed_dim)
@@ -30,18 +29,14 @@ class GoalsGenerator(nn.Module):
         # Q: (B, C, D)
         # K: (B, T, D)
 
-        D = Q.shape[-1]
-
-        scaling = 1 / math.sqrt(D)
-
         Q_proj: torch.Tensor = self.q_proj(Q)  # (B, C, D)
         K_proj: torch.Tensor = self.k_proj(K)  # (B, T, D)
 
         Q_proj = self.q_norm(Q_proj)  # (B, C, D)
         K_proj = self.k_norm(K_proj)  # (B, T, D)
 
-        QKT = torch.matmul(Q_proj, K_proj.transpose(-2, -1)) * scaling  # (B, C, T)
-        QKT = torch.softmax(QKT, dim=-1, dtype=torch.float32).to(Q.dtype)  # (B, C, T)
+        QKT = torch.matmul(Q_proj, K_proj.transpose(-2, -1))  # (B, C, T)
+        # QKT = torch.softmax(QKT, dim=-1, dtype=torch.float32).to(Q.dtype)  # (B, C, T)
 
         return QKT  # (B, C, T)
 
@@ -192,20 +187,17 @@ class Net(nn.Module):
 
     def forward(
         self,
-        cameras: torch.Tensor,
-        targets: torch.Tensor,
-        obstacles: torch.Tensor,
-        warehouses: torch.Tensor,
+        X: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         # cameras: B x C x camera_dim
         # Targets: B x T x target_dim
         # obstacles: B x O x obstacle_dim
         # warehouses: B x W x warehouse_dim
 
-        cam_emb = self.cameras(cameras)  # B x C x embed_dim
-        tar_emb = self.targets(targets)  # B x T x embed_dim
-        obs_emb = self.obstacles(obstacles)  # B x O x embed_dim
-        wh_emb = self.warehouses(warehouses)  # B x W x embed_dim
+        cam_emb = self.cameras(X["cameras"])  # B x C x embed_dim
+        tar_emb = self.targets(X["targets"])  # B x T x embed_dim
+        obs_emb = self.obstacles(X["obstacles"])  # B x O x embed_dim
+        wh_emb = self.warehouses(X["warehouses"])  # B x W x embed_dim
 
         out = self.encoder(cam_emb, tar_emb, obs_emb, wh_emb)  # B x C x embed_dim
 
@@ -217,16 +209,16 @@ class Net(nn.Module):
 def main():
     test_mlp = Net()
 
-    temp_input_data = [
-        torch.zeros(4, 8 * 8),  # cameras
-        torch.zeros(8, 3 * 8),  # targets
-        torch.zeros(9, 3),  # obstacles
-        torch.zeros(1, 2),  # warehouses
-    ]
+    temp_input_data = {
+        "cameras": torch.randn(1, 4, 8 * 8),  # cameras 1, 4, 64
+        "targets": torch.randn(1, 8, 3 * 8),  # targets 1, 8, 24
+        "obstacles": torch.randn(1, 9, 3),  # obstacles 1, 9, 3
+        "warehouses": torch.randn(1, 4, 2),  # warehouses 1, 4, 2
+    }
 
     # summary(test_mlp, input_data=temp_input_data, col_names=["input_size", "output_size", "num_params"], depth=5)
 
-    print(test_mlp(*temp_input_data))  # 1 x C x T
+    print(test_mlp(temp_input_data))  # 1 x C x T
 
 
 if __name__ == "__main__":

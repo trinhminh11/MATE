@@ -39,18 +39,20 @@ def to_device(*args, device="cuda"):
 
 def to_torch(
     x: NDArray | dict[str, NDArray],
-    device: str | torch.device,
+    device: str | torch.device = None,
+    dtype: torch.dtype = None,
 ) -> torch.Tensor | dict[str, torch.Tensor]:
     """
     Convert a numpy array or a dictionary of numpy array to a torch.Tensor.
 
     :param x: the input numpy array or dictionary of numpy array
     :param device: the device to which the tensor(s) will be moved
+    :param dtype: the dtype of the tensor(s)
     :return: the tensor or dictionary of tensors as torch.Tensor(s)
     """
     if isinstance(x, dict):
-        return {key: torch.from_numpy(value).to(device) for key, value in x.items()}
-    return torch.from_numpy(x).to(device)
+        return {key: torch.from_numpy(value).to(device=device, dtype=dtype) for key, value in x.items()}
+    return torch.from_numpy(x).to(device=device, dtype=dtype)
 
 def get_shape(
     space: spaces.Space,

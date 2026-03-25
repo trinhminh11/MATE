@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -43,7 +43,7 @@ class A2C(ActorCriticPolicyAgent):
 
     def __init__(
         self,
-        env_id: str,
+        env: str | Callable,
         policy: ActorCriticPolicy,
         config: Optional[A2CConfig] = None,
     ):
@@ -51,7 +51,7 @@ class A2C(ActorCriticPolicyAgent):
         config.batch_size = config.n_steps * config.num_envs    # for on-policy, batch_size is n_steps * num_envs
 
         super().__init__(
-            env_id=env_id,
+            env=env,
             policy=policy,
             config=config,
             supported_action_spaces=(

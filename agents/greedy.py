@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from mate.constants import MAX_CAMERA_VIEWING_ANGLE, NUM_WAREHOUSES, WAREHOUSES
+from mate.constants import MAX_CAMERA_VIEWING_ANGLE
 from mate.utils import normalize_angle, sin_deg
 from mate.agents.utils import TargetStatePublic
 from .base import GoalsBaseAgent
@@ -90,10 +90,11 @@ class GreedyCameraAgent(GoalsBaseAgent):  # pylint: disable=too-many-instance-at
                 ts for ts in tracked_targets if ts.is_loaded or self.never_loaded[ts.index]
             ]
 
-
+        action = None
         if len(tracked_targets) > 0:
             action = self.act_from_target_states(tracked_targets)
-        else:
+
+        if action is None:
             if self.np_random.binomial(1, 0.1) != 0:
                 action = self.action_space.sample()
             else:
@@ -161,6 +162,9 @@ class GreedyCameraAgent(GoalsBaseAgent):  # pylint: disable=too-many-instance-at
             return np.clip(best, a_min=self.state.min_viewing_angle, a_max=MAX_CAMERA_VIEWING_ANGLE)
 
         target_state = select_target()
+
+        if target_state is None:
+            return None
 
         return np.asarray(
             [

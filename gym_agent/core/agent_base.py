@@ -36,22 +36,22 @@ from gym_agent.core.vec_env.subproc_vec_env import SubprocVecEnv
 
 from .buffers import BaseBuffer, ReplayBuffer, RolloutBuffer
 from .callbacks import Callbacks
+from .logger import Logger, configure
 from .main import make
 from .polices import ActorCriticPolicy, BasePolicy
-from .logger import configure, Logger
 
 ObsType = TypeVar("ObsType", NDArray, dict[str, NDArray])
 ActType = TypeVar("ActType", NDArray, dict[str, NDArray])
 
 
-def auto_find_path(path, env_id: str, name: str, model_version="last"):
+def auto_find_path(path, env: str, name: str, model_version="last"):
     """
     Automatically find the correct path given partial path information.
-    .../env_id/name/start_training_time/model_version*
+    .../env/name/start_training_time/model_version*
 
     Args:
         path (str or Path): Base path (could be incomplete).
-        env_id (str): Environment identifier.
+        env (str): Environment identifier.
         name (str): Name of the model or entity.
         model_version (str): Model version, default "last".
 
@@ -64,7 +64,7 @@ def auto_find_path(path, env_id: str, name: str, model_version="last"):
 
     base_path = Path(path).resolve()
 
-    env_id = env_id.strip()
+    env = env.strip()
     name = name.strip()
     model_version = model_version.strip()
 
@@ -74,19 +74,19 @@ def auto_find_path(path, env_id: str, name: str, model_version="last"):
 
     # Adjust path based on ending
     if (
-        base_path.parts[-2] == name and base_path.parts[-3] == env_id
-    ):  # .../env_id/name/start_time
+        base_path.parts[-2] == name and base_path.parts[-3] == env
+    ):  # .../env/name/start_time
         pass
-    elif base_path.name == name:  # .../env_id/name
+    elif base_path.name == name:  # .../env/name
         pass
-    elif base_path.name == env_id:  # .../env_id
+    elif base_path.name == env:  # .../env
         base_path = base_path / name
     else:
-        # Search recursively for env_id/name directory structure
-        found_paths = list(base_path.rglob(f"{env_id}/{name}"))
+        # Search recursively for env/name directory structure
+        found_paths = list(base_path.rglob(f"{env}/{name}"))
         if not found_paths:
             raise FileNotFoundError(
-                f"Could not find '{env_id}/{name}' under {base_path}"
+                f"Could not find '{env}/{name}' under {base_path}"
             )
         base_path = found_paths[0]  # Pick the first match (you could sort if needed)
 
@@ -104,7 +104,7 @@ def auto_find_path(path, env_id: str, name: str, model_version="last"):
         return matches[0]
 
     raise FileNotFoundError(
-        f"No matching file found for model_version '{model_version}' in {base_path} with env_id '{env_id}' and name '{name}'."
+        f"No matching file found for model_version '{model_version}' in {base_path} with env '{env}' and name '{name}'."
     )
 
 
@@ -196,7 +196,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
     def __init__(
         self,
-        env_id: str,
+        env: str | Callable,
         policy: BasePolicy,
         config: AgentConfig,
         supported_action_spaces: Optional[
@@ -207,7 +207,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         Initialize the agent.
         This method sets up the agent with its environment, policy, and configuration.
         Args:
-            env_id (str): The ID of the environment to create.
+            env (str): The ID of the environment to create.
             policy (BasePolicy): The policy to use for the agent.
             config (AgentConfig): The configuration for the agent, which includes:
                 - env_kwargs (dict, optional): Additional arguments for environment creation.
@@ -221,7 +221,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
                 The action space types supported by this agent. Used for algorithm validation,
                 not for user configuration.
         Raises:
-            ValueError: If policy is not an instance of BasePolicy, env_id is not a string,
+            ValueError: If policy is not an instance of BasePolicy, env is not a string,
                        supported_action_spaces is not a tuple, or the action space of the
                        environment is not supported.
         Notes:
@@ -238,7 +238,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         self.name = self.__class__.__name__
 
-        self.env_id = env_id
+        self.env = env
 
         env_kwargs = config.env_kwargs or {}
 
@@ -246,32 +246,36 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         self.env_kwargs = env_kwargs
 
-        if isinstance(self.env_id, str):
-            env_factory_fn = lambda **kwargs: make(self.env_id, **kwargs)  # noqa: E731
+        if isinstance(self.env, str):
+            env_factory_fn = lambda **kwargs: make(self.env, **kwargs)  # noqa: E731
 
-            async_vectorization = config.async_vectorization
-            if config.num_envs <= 1:
-                async_vectorization = (
-                    False  # no need to use async vectorization for single env
-                )
 
-            if async_vectorization:
-                self.envs = SubprocVecEnv(
-                    [
-                        lambda: env_factory_fn(**env_kwargs)
-                        for _ in range(config.num_envs)
-                    ]
-                )
-            else:
-                self.envs = DummyVecEnv(
-                    [
-                        lambda: env_factory_fn(**env_kwargs)
-                        for _ in range(config.num_envs)
-                    ]
-                )
+        elif callable(self.env):
+            env_factory_fn = self.env
         else:
             raise ValueError(
-                "env_id must be a string. currently not implemented for custom environments."
+                "env must be a string or a callable function that returns an environment instance. currently not implemented for custom environments."
+            )
+
+        async_vectorization = config.async_vectorization
+        if config.num_envs <= 1:
+            async_vectorization = (
+                False  # no need to use async vectorization for single env
+            )
+
+        if async_vectorization:
+            self.envs = SubprocVecEnv(
+                [
+                    lambda: env_factory_fn(**env_kwargs)
+                    for _ in range(config.num_envs)
+                ]
+            )
+        else:
+            self.envs = DummyVecEnv(
+                [
+                    lambda: env_factory_fn(**env_kwargs)
+                    for _ in range(config.num_envs)
+                ]
             )
 
         self.env_factory_fn = env_factory_fn
@@ -308,7 +312,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         self.device = utils.get_device(config.device)
 
-        #TODO using log
+        # TODO using log
         print("Using device:", self.device)
 
         self.seed = config.seed
@@ -439,7 +443,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         policy_info = self.policy.save_info()
         save_info = {
             "config": {
-                "env_id": self.env_id,
+                "env": self.env,
                 "config_class": f"{self.config.__class__.__module__}.{self.config.__class__.__qualname__}",
             }
             | asdict(self.config),
@@ -499,7 +503,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
             load_key (list[str], optional): The keys to load. If not provided, defaults to ["policy", "total_timesteps", "scores", "mean_scores", "optimizers"] + self.save_kwargs.
         """
 
-        # paths is: .../env_id/agent_name/time/name.pth
+        # paths is: .../env/agent_name/time/name.pth
 
         load_dir = Path(load_dir)
 
@@ -528,9 +532,9 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         # loading configuration from yaml:
         with open(load_dir / "config.yaml", "r") as f:
             data: dict = yaml.safe_load(f)
-            if "config_class" in data and "env_id" in data:
+            if "config_class" in data and "env" in data:
                 config_class_str: str = data.pop("config_class")
-                env_id = data.pop("env_id")
+                env = data.pop("env")
 
                 module_name, class_name = config_class_str.rsplit(".", 1)
 
@@ -546,12 +550,12 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
                 config=Config(strict=True),
             )
 
-        return env_id, config
+        return env, config
 
     @classmethod
     def from_checkpoint(
         cls,
-        env_id: str,
+        env: str,
         policy: BasePolicy,
         path: Path | str,
         model_version: str = "last",
@@ -569,7 +573,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         path = Path(path)
 
         load_file = auto_find_path(
-            path, env_id=env_id, name=cls.__name__, model_version=model_version
+            path, env=env, name=cls.__name__, model_version=model_version
         )
 
         # TODO: add logging
@@ -587,15 +591,15 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
             load_dir = temp_path
 
             # loading configuration from yaml:
-            config_env_id, config = cls.load_config(load_dir)
-            if config_env_id != env_id:
+            config_env, config = cls.load_config(load_dir)
+            if config_env != env:
                 warnings.warn(
-                    f"Warning: env_id in config ({config_env_id}) does not match the provided env_id ({env_id}). Using the config env_id."
+                    f"Warning: env in config ({config_env}) does not match the provided env ({env}). Using the config env."
                 )
-                env_id = config_env_id
+                env = config_env
 
             # Create the agent instance
-            agent = cls(env_id=env_id, policy=policy, config=config)
+            agent = cls(env=env, policy=policy, config=config)
             # Load the model parameters
             agent.load_model(load_dir)
 
@@ -698,7 +702,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         save_dir: Path = (
             Path(save_dir)
-            / self.env_id
+            / self.env
             / self.name
             / train_begin.strftime("%Y-%m-%d_%H-%M-%S")
         )
@@ -706,12 +710,11 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         log_dir: Path = (
             Path(log_dir)
-            / self.env_id
+            / self.env
             / self.name
             / train_begin.strftime("%Y-%m-%d_%H-%M-%S")
         )
         log_dir.mkdir(parents=True, exist_ok=True)
-
 
         self._logger = configure(
             log_formats=log_formats,
@@ -763,7 +766,6 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
             log_dir=log_dir,
             log_formats=log_formats,
         )
-
 
         callbacks.on_train_begin()
         self.policy.train()
@@ -851,10 +853,12 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
                 callbacks.on_learn_end()
                 self.n_updates += 1
 
-            time_elapsed = (datetime.now().timestamp() - self.start_time)   # seconds
+            time_elapsed = datetime.now().timestamp() - self.start_time  # seconds
             fps = int((self.timesteps - self._num_timesteps_at_start) / time_elapsed)
             self.logger.record("time/iterations", iteration, exclude="tensorboard")
-            self.logger.record("time/total_timesteps", self.timesteps, exclude="tensorboard")
+            self.logger.record(
+                "time/total_timesteps", self.timesteps, exclude="tensorboard"
+            )
             self.logger.record("time/episodes", self.episodes, exclude="tensorboard")
             self.logger.record("time/n_updates", self.n_updates, exclude="tensorboard")
             self.logger.record("time/time_elapsed", time_elapsed, exclude="tensorboard")
@@ -1007,14 +1011,14 @@ class OffPolicyAgent(AgentBase[ObsType, ActType]):
 
     def __init__(
         self,
-        env_id: str,
+        env: str,
         policy: BasePolicy,
         config: OffPolicyAgentConfig = None,
         supported_action_spaces: Optional[tuple[type[spaces.Space], ...]] = None,
     ):
         config = config if config is not None else OffPolicyAgentConfig()
         super().__init__(
-            env_id=env_id,
+            env=env,
             policy=policy,
             config=config,
             supported_action_spaces=supported_action_spaces,
@@ -1099,14 +1103,14 @@ class ActorCriticPolicyAgent(AgentBase[ObsType, ActType]):
 
     def __init__(
         self,
-        env_id: str,
+        env: str,
         policy: ActorCriticPolicy,
         config: ActorCriticAgentConfig = None,
         supported_action_spaces: Optional[tuple[type[spaces.Space], ...]] = None,
     ):
         config = config if config is not None else ActorCriticAgentConfig()
         super().__init__(
-            env_id=env_id,
+            env=env,
             policy=policy,
             config=config,
             supported_action_spaces=supported_action_spaces,

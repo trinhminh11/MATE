@@ -62,15 +62,16 @@ class TargetPolicy(BasePolicy):
     def __init__(
         self,
         net_factory_func: Callable[..., nn.Module],
-        lr: float,
+        net_factory_func_kwargs: Optional[dict] = None,
+        lr: float=0.0001,
         optim_cls: type[optim.Optimizer] = optim.Adam,
         optim_kwargs: Optional[dict] = None,
         lr_scheduler_cls: Optional[type[optim.lr_scheduler._LRScheduler]] = None,
         lr_scheduler_kwargs: Optional[dict] = None,
     ):
         super().__init__()
-        self.net = net_factory_func()
-        self.target_net = net_factory_func()
+        self.net = net_factory_func(**(net_factory_func_kwargs or {}))
+        self.target_net = net_factory_func(**(net_factory_func_kwargs or {}))
 
         self.optimizers = {
             "net": optim_cls(self.net.parameters(), lr=lr, **(optim_kwargs or {}))
@@ -217,9 +218,7 @@ class ActorCriticPolicy(BasePolicy):
         """ Forward pass through the actor and critic networks.
 
         Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
+            x (torch.Tensor): Input tensor.              
             tuple[torch.Tensor, torch.Tensor]: Action logits and value logits.
         """
         features = self.extract_features(x)

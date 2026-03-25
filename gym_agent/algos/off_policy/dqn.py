@@ -1,6 +1,6 @@
 import random
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -27,13 +27,13 @@ class DQN(OffPolicyAgent):
 
     def __init__(
         self,
-        env_id: str,
+        env: str | Callable,
         policy: TargetPolicy,
         config: Optional[DQNConfig] = None,
     ):
         config = config if config is not None else DQNConfig()
         super().__init__(
-            env_id=env_id,
+            env=env,
             policy=policy,
             config=config,
             supported_action_spaces=(
@@ -77,7 +77,7 @@ class DQN(OffPolicyAgent):
         # Epsilon-greedy action selection
         if random.random() >= eps:
             # Convert state to tensor and move to the appropriate device
-            state = to_torch(state, self.device).float()
+            state = to_torch(state, self.device, dtype=torch.float32)
 
             # Set local model to evaluation mode
             self.policy.eval()
@@ -86,10 +86,18 @@ class DQN(OffPolicyAgent):
             # Set local model back to training mode
             self.policy.train()
 
+            if isinstance(self.action_space, spaces.MultiBinary):
+                # For MultiBinary and MultiDiscrete action spaces, we can use a threshold to determine the action
+                return (action_value.cpu().data.numpy() > 0.5).astype(int)
+
             # Return the action with the highest value
             return np.argmax(action_value.cpu().data.numpy(), axis=1)
         else:
             # Return a random action from the action space
+            if isinstance(self.action_space, spaces.MultiBinary):
+                return np.random.randint(
+                    2, size=(state.shape[0], self.action_space.n)
+                )  # for MultiBinary, we need to sample each binary action separately
             return np.array(
                 [self.envs.single_action_space.sample() for _ in range(state.shape[0])]
             )

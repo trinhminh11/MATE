@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -43,13 +43,13 @@ class PPO(ActorCriticPolicyAgent):
 
     def __init__(
         self,
-        env_id: str,
+        env: str | Callable,
         policy: ActorCriticPolicy,
         config: Optional[PPOConfig] = None,
     ):
         config = config if config is not None else PPOConfig()
         super().__init__(
-            env_id=env_id,
+            env=env,
             policy=policy,
             config=config,
             supported_action_spaces=(

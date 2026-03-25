@@ -384,10 +384,10 @@ class BernoulliDistribution(Distribution):
         return self
 
     def log_prob(self, actions: th.Tensor) -> th.Tensor:
-        return self.distribution.log_prob(actions).sum(dim=1)
+        return self.distribution.log_prob(actions).flatten(start_dim=1).sum(dim=1)  # sum log probs of each binary action except the batch dim
 
     def entropy(self) -> th.Tensor:
-        return self.distribution.entropy().sum(dim=1)
+        return self.distribution.entropy().flatten(start_dim=1).sum(dim=1)  # sum entropies of each binary action except the batch dim
 
     def sample(self) -> th.Tensor:
         return self.distribution.sample()
@@ -673,9 +673,9 @@ def make_proba_distribution(
     elif isinstance(action_space, spaces.MultiDiscrete):
         return MultiCategoricalDistribution(list(action_space.nvec), **dist_kwargs)
     elif isinstance(action_space, spaces.MultiBinary):
-        assert isinstance(
-            action_space.n, int
-        ), f"Multi-dimensional MultiBinary({action_space.n}) action space is not supported. You can flatten it instead."
+        # assert isinstance(
+        #     action_space.n, int
+        # ), f"Multi-dimensional MultiBinary({action_space.n}) action space is not supported. You can flatten it instead."
         return BernoulliDistribution(action_space.n, **dist_kwargs)
     else:
         raise NotImplementedError(
