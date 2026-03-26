@@ -370,7 +370,7 @@ class AgentAsActionWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        self.info = None
+        self.info = info
 
         for i in range(len(self.agents)):
             self.agents[i].reset(obs[i])
@@ -390,7 +390,7 @@ class AgentAsActionWrapper(gym.Wrapper):
         #     self.agents[i].observe(self.obs[i], self.info[i] if self.info is not None else None)
 
         camera_joint_action = mate.group_step(
-            self.env.unwrapped, self.agents, self.obs, self.info
+            self.env.unwrapped, self.agents, self.obs, self.info['infos']
         )
 
         # group communicate
@@ -406,6 +406,7 @@ class AgentAsActionWrapper(gym.Wrapper):
         # # group act
         # for i in range(len(self.agents)):
         #     actions[i] = self.agents[i].act(self.obs[i], self.info[i] if self.info is not None else None)
+
 
         obs, reward, done, truncated, info = self.env.step(camera_joint_action)
         self.obs = obs
@@ -458,7 +459,8 @@ class NetWrapper(gym.Wrapper):
                     high=1.0,
                     shape=(
                         self.num_cameras,
-                        self.skip * observation_space["cameras"].shape[-1],
+                        self.skip,
+                        observation_space["cameras"].shape[-1],
                     ),
                     dtype=np.float64,
                 ),
@@ -467,7 +469,8 @@ class NetWrapper(gym.Wrapper):
                     high=1.0,
                     shape=(
                         self.num_targets,
-                        self.skip * observation_space["targets"].shape[-1],
+                        self.skip,
+                        observation_space["targets"].shape[-1],
                     ),
                     dtype=np.float64,
                 ),
@@ -487,16 +490,11 @@ class NetWrapper(gym.Wrapper):
         # cameras_history: (history_len, num_cameras, camera_state_dim)
         # targets_history: (history_len, num_targets, target_state_dim)
 
-        n_cameras = cameras_history.shape[1]
-        n_targets = targets_history.shape[1]
 
-        # Permute to (num_cameras, history_len, camera_state_dim) and flatten history
-        cameras_history = cameras_history.transpose(1, 0, 2).reshape(
-            n_cameras, -1
-        )  # (num_cameras, history_len * camera_state_dim)
-        targets_history = targets_history.transpose(1, 0, 2).reshape(
-            n_targets, -1
-        )  # (num_targets, history_len * target_state_dim)
+        # Permute to (num_cameras, history_len, camera_state_dim)
+        cameras_history = cameras_history.transpose(1, 0, 2)
+        # Permute to (num_targets, history_len, target_state_dim)
+        targets_history = targets_history.transpose(1, 0, 2)
 
         return cameras_history, targets_history
 
@@ -506,7 +504,7 @@ class NetWrapper(gym.Wrapper):
         for _ in range(self.skip):
             obs, reward, done, truncated, info = self.env.step(goals)
             if self.reward_type == "coverage_rate":
-                reward = info[0]["coverage_rate"]
+                reward = info["infos"][0]["coverage_rate"]
 
             self.cameras_history = np.roll(self.cameras_history, shift=-1, axis=0)
             self.cameras_history[-1] = obs["cameras"]
