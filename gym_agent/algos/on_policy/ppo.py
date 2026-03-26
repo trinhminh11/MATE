@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from gymnasium import spaces
 
-from gym_agent.utils import to_torch
+import wandb
 from gym_agent.core.agent_base import (
     ActorCriticAgentConfig,
     ActorCriticPolicyAgent,
@@ -22,13 +22,14 @@ from gym_agent.core.distributions import (
     make_proba_distribution,
 )
 from gym_agent.core.polices import ActorCriticPolicy
+from gym_agent.utils import to_torch
 
 
 @dataclass(kw_only=True)
 class PPOConfig(ActorCriticAgentConfig):
     max_grad_norm: Optional[float] = 0.5
     vf_coef: float = 0.5
-    entropy_coef: float = 0.0
+    entropy_coef: float = 0.001
     normalize_advantage: bool = True
     n_epochs: int = 4
     clip_range: float = 0.2
@@ -36,6 +37,7 @@ class PPOConfig(ActorCriticAgentConfig):
 
     # redefined parameters from base class with different default values
     n_steps: int = 2048
+    gae_lambda: float = 0.95
 
 
 class PPO(ActorCriticPolicyAgent):
@@ -103,7 +105,7 @@ class PPO(ActorCriticPolicyAgent):
         actions = dist.get_actions(deterministic=deterministic)
         return actions.cpu().numpy()
 
-    def learn(self) -> None:
+    def learn(self, wandb_run: Optional[wandb.Run] = None) -> None:
         """
         Update policy using the currently gathered rollout buffer.
         """
@@ -163,6 +165,20 @@ class PPO(ActorCriticPolicyAgent):
 
                 if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
                     break
+
+                if wandb_run:
+                    wandb_run.log(
+                        {
+                            "loss/policy_loss": policy_loss.item(),
+                            "loss/value_loss": value_loss.item(),
+                            "loss/entropy_loss": entropy_loss.item(),
+                            "loss/total_loss": loss.item(),
+                            "clip_fraction": torch.mean(
+                                (torch.abs(p_ratio - 1) > self.clip_range).float()
+                            ).item(),
+                            "approx_kl_div": approx_kl_div,
+                        }
+                    )
 
                 self.policy.zero_grad()
                 loss.backward()

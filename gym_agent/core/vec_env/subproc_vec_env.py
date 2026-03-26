@@ -71,7 +71,10 @@ def _worker(
             else:
                 raise NotImplementedError(f"`{cmd}` is not implemented in the worker")
         except EOFError:
-            break
+            import traceback
+            remote.send(RuntimeError("Worker process encountered an EOFError. This likely means the worker process crashed.", traceback.format_exc()))
+            remote.close()
+
         except KeyboardInterrupt:
             break
 
@@ -140,6 +143,9 @@ class SubprocVecEnv(VecEnv):
 
     def step_wait(self) -> VecEnvStepReturn:
         results = [remote.recv() for remote in self.remotes]
+        for result in results:
+            if isinstance(result, Exception):
+                raise result
         self.waiting = False
         obs, rews, terminated, truncated, infos, self.reset_infos = zip(*results)
         return obs, rews, terminated, truncated, infos

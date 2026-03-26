@@ -1,4 +1,5 @@
 # Standard library imports
+import base64
 import importlib
 import pickle
 import tempfile
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Generic, Optional, Type, TypeVar
 
 # Third-party imports
+import dill
 import gymnasium as gym
 import numpy as np
 import torch
@@ -21,6 +23,7 @@ from dacite import Config, from_dict
 from gymnasium import spaces
 from numpy.typing import NDArray
 from tqdm import tqdm
+import wandb
 
 import gym_agent.utils as utils
 from gym_agent.core.distributions import (
@@ -39,6 +42,7 @@ from .callbacks import Callbacks
 from .logger import Logger, configure
 from .main import make
 from .polices import ActorCriticPolicy, BasePolicy
+from typing import Literal
 
 ObsType = TypeVar("ObsType", NDArray, dict[str, NDArray])
 ActType = TypeVar("ActType", NDArray, dict[str, NDArray])
@@ -159,10 +163,11 @@ class Clock:
 
 @dataclass(kw_only=True)
 class AgentConfig:
-    env_kwargs: dict[str, Any] = None
+    env_kwargs: Optional[dict[str, Any]] = None
     num_envs: int = 1
     n_steps: int = 1
     batch_size: int = 64
+    log_score_type: Literal['mean', 'sum'] = 'sum'
     async_vectorization: bool = True
     device: str = "auto"
     seed: Optional[int] = None
@@ -238,7 +243,10 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         self.name = self.__class__.__name__
 
-        self.env_func = env
+        if isinstance(env, str):
+            self.env_func = lambda **kwargs: make(env, **kwargs)  # noqa: E731
+        elif callable(env):
+            self.env_func = env
 
         env_kwargs = config.env_kwargs or {}
 
@@ -330,6 +338,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         self.scores: list[float] = []
         # keep track of each env current running score
         self.current_scores = np.zeros(self.num_envs, dtype=np.float32)
+        self.current_episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
 
         self.save_kwargs: list[str] = []
 
@@ -443,7 +452,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         policy_info = self.policy.save_info()
         save_info = {
             "config": {
-                "env": self.env_func,
+                "env": base64.b64encode(dill.dumps(self.env_func)).decode("utf-8"),
                 "config_class": f"{self.config.__class__.__module__}.{self.config.__class__.__qualname__}",
             }
             | asdict(self.config),
@@ -519,7 +528,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         )
 
     @staticmethod
-    def load_config(load_dir: Path | str) -> AgentConfig:
+    def load_config(load_dir: Path | str) -> tuple[Callable, AgentConfig]:
         """Load the agent's configuration from a file.
 
         Args:
@@ -534,7 +543,12 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
             data: dict = yaml.safe_load(f)
             if "config_class" in data and "env" in data:
                 config_class_str: str = data.pop("config_class")
-                env = data.pop("env")
+                env_func_str = data.pop("env")
+
+                # Decode the base64 encoded environment function
+                env_func_bytes = base64.b64decode(env_func_str)
+                env_func = dill.loads(env_func_bytes)
+
 
                 module_name, class_name = config_class_str.rsplit(".", 1)
 
@@ -550,7 +564,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
                 config=Config(strict=True),
             )
 
-        return env, config
+        return env_func, config
 
     @classmethod
     def from_checkpoint(
@@ -594,15 +608,15 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
             load_dir = temp_path
 
             # loading configuration from yaml:
-            config_env, config = cls.load_config(load_dir)
-            if config_env != env_id:
-                warnings.warn(
-                    f"Warning: env in config ({config_env}) does not match the provided env ({env_id}). Using the config env."
-                )
-                env_id = config_env
+            config_env_func, config = cls.load_config(load_dir)
+            # if config_env != env_id:
+            #     warnings.warn(
+            #         f"Warning: env in config ({config_env}) does not match the provided env ({env_id}). Using the config env."
+            #     )
+            #     env_id = config_env_func
 
             # Create the agent instance
-            agent = cls(env=env_id, policy=policy, config=config)
+            agent = cls(env=config_env_func, policy=policy, config=config)
             # Load the model parameters
             agent.load_model(load_dir)
 
@@ -659,7 +673,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         raise NotImplementedError
 
     @abstractmethod
-    def learn(self) -> None:
+    def learn(self, wandb_run: Optional[wandb.Run] = None) -> None:
         raise NotImplementedError
 
     def _setup_fit(
@@ -741,6 +755,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         log_interval: int = 1,
         progress_bar: Optional[Type[tqdm]] = tqdm,
         callbacks: Type[Callbacks] = None,
+        wandb_api: str = None
     ):
         """
         Train the agent for a certain number of timesteps.
@@ -779,6 +794,12 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         last_best_score = None
 
         iteration = 0
+
+        if wandb_api is not None:
+            wandb.login(key=wandb_api)
+            wandb_run = wandb.init(project=wandb_api, name=self.envs.env_id)
+        else:
+            wandb_run = None
 
         while True:
             self.reset()
@@ -852,7 +873,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
             if len(self.memory) > self.batch_size:
                 callbacks.on_learn_begin()
-                self.learn()
+                self.learn(wandb_run)
                 callbacks.on_learn_end()
                 self.n_updates += 1
 
@@ -880,11 +901,14 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
             save_dir, f"last_{np.mean(self.scores[-self._mean_score_window :]):.2f}"
         )
 
+        if wandb_api is not None:
+            wandb_run.finish()
+
         callbacks.on_train_end()
         self.end_time = datetime.now().timestamp()
         self.logger.close()
 
-    def play(
+    def run_episode(
         self,
         # env: EnvWithTransform = None,
         env_kwargs: dict[str, Any] = None,
@@ -894,17 +918,18 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         deterministic=True,
         seed=None,
         options: Optional[dict[str, Any]] = None,
+        render: bool = False,
         jupyter: bool = False,
     ):
-        if jupyter:
-            from IPython.display import (
-                display,  # pyright: ignore[reportMissingModuleSource] # type
-            )
-            from PIL import Image
-        else:
-            import pygame
-
-            pygame.init()
+        if render:
+            if jupyter:
+                from IPython.display import (
+                    display,  # pyright: ignore[reportMissingModuleSource] # type
+                )
+                from PIL import Image
+            else:
+                import pygame
+                pygame.init()
 
         # _env_kwargs = self.env_kwargs | {"render_mode": "rgb_array" if jupyter else "human", "max_episode_steps": max_episode_steps}
 
@@ -939,17 +964,22 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
                     break
 
                 clock.tick(FPS)
-                pixel = env.render()
+                if render:
+                    pixel = env.render()
 
-                if jupyter:
-                    display(Image.fromarray(pixel), clear=True)
+                    if jupyter:
+                        display(Image.fromarray(pixel), clear=True)
 
                 if isinstance(env.observation_space, gym.spaces.Dict):
                     _obs = {key: np.expand_dims(obs[key], 0) for key in obs}
                 else:
                     _obs = np.expand_dims(obs, 0)
 
-                action = self.predict(_obs, deterministic)
+                if score == 0:
+                    action = env.action_space.sample()
+                    action = np.ones([1, *action.shape])  # ensure the action has batch dimension
+                else:
+                    action = self.predict(_obs, deterministic)
 
                 next_obs, reward, terminated, truncated, info = env.step(action[0])
 
@@ -959,15 +989,44 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
                 score += reward
 
-                if not jupyter:
+                if not jupyter and render:
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
                             done = True
 
-        if not jupyter:
+        if not jupyter and render:
             pygame.quit()
 
-        return score, info
+        return {
+            "score": score,
+            "timesteps": time_step,
+            "last_info": info,
+        }
+
+    def play(
+        self,
+        # env: EnvWithTransform = None,
+        env_kwargs: dict[str, Any] = None,
+        max_episode_steps: int = None,
+        FPS: int = 30,
+        stop_if_truncated: bool = True,
+        deterministic=True,
+        seed=None,
+        options: Optional[dict[str, Any]] = None,
+        jupyter: bool = False,
+    ):
+
+        return self.run_episode(
+            env_kwargs,
+            max_episode_steps,
+            FPS,
+            stop_if_truncated,
+            deterministic,
+            seed,
+            options,
+            render=True,
+            jupyter=jupyter,
+        )
 
     def play_jupyter(
         self,
@@ -1041,6 +1100,8 @@ class OffPolicyAgent(AgentBase[ObsType, ActType]):
     @abstractmethod
     def learn(
         self,
+        wandb_run: Optional[wandb.Run] = None
+
     ) -> None:
         """
         Abstract method to be implemented by subclasses for learning from a batch of experiences.
@@ -1073,11 +1134,18 @@ class OffPolicyAgent(AgentBase[ObsType, ActType]):
             )  # episode starts is just done
 
             self.current_scores += np.array(rewards, dtype=np.float32)
+            self.current_episode_lengths += 1
 
             # if an env is done, record the score and reset the current score for that env
-            self.scores.extend(self.current_scores[self._last_episode_starts].tolist())
+            if self.config.log_score_type == 'mean':
+                self.scores.extend(
+                    (self.current_scores[self._last_episode_starts] / self.current_episode_lengths[self._last_episode_starts]).tolist()
+                )
+            elif self.config.log_score_type == 'sum':
+                self.scores.extend(self.current_scores[self._last_episode_starts].tolist())
             # reset the current score for that env
             self.current_scores[self._last_episode_starts] = 0.0
+            self.current_episode_lengths[self._last_episode_starts] = 0
             # count how many episodes finished
             episodes += np.sum(self._last_episode_starts)
 
@@ -1137,7 +1205,7 @@ class ActorCriticPolicyAgent(AgentBase[ObsType, ActType]):
         pass
 
     @abstractmethod
-    def learn(self) -> None:
+    def learn(self, wandb_run: Optional[wandb.Run] = None) -> None:
         """
         Perform learning using the experiences stored in the memory buffer.
 
@@ -1221,11 +1289,18 @@ class ActorCriticPolicyAgent(AgentBase[ObsType, ActType]):
             )  # episode starts is just done
 
             self.current_scores += np.array(rewards, dtype=np.float32)
+            self.current_episode_lengths += 1
 
             # if an env is done, record the score and reset the current score for that env
-            self.scores.extend(self.current_scores[self._last_episode_starts].tolist())
+            if self.config.log_score_type == 'mean':
+                self.scores.extend(
+                    (self.current_scores[self._last_episode_starts] / self.current_episode_lengths[self._last_episode_starts]).tolist()
+                )
+            elif self.config.log_score_type == 'sum':
+                self.scores.extend(self.current_scores[self._last_episode_starts].tolist())
             # reset the current score for that env
             self.current_scores[self._last_episode_starts] = 0.0
+            self.current_episode_lengths[self._last_episode_starts] = 0
             # count how many episodes finished
             episodes += np.sum(self._last_episode_starts)
 
