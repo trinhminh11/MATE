@@ -894,6 +894,21 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
                 self.scores[-1] if len(self.scores) > 0 else None,
             )
 
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        "time/iterations": iteration,
+                        "time/total_timesteps": self.timesteps,
+                        "time/episodes": self.episodes,
+                        "time/n_updates": self.n_updates,
+                        "time/time_elapsed": time_elapsed,
+                        "time/fps": fps,
+                        "rollout/avg_score": avg_score,
+                        "rollout/score": self.scores[-1] if len(self.scores) > 0 else None,
+                    },
+                    step=self.timesteps,
+                )
+
             if log_interval > 0 and iteration % log_interval == 0:
                 self.logger.dump(iteration)
 
