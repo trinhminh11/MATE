@@ -68,7 +68,7 @@ def group_act(
 ) -> List[Union[int, np.ndarray]]:
     """Get the joint action of a group of agents."""
 
-    if infos is None:
+    if infos is None or len(infos) == 0:
         infos = itertools.repeat(None)
 
     return [
@@ -245,7 +245,9 @@ class SingleTeamMultiAgent(SingleTeamHelper):
         group_reset(self.opponent_agents, self.opponent_joint_observation)
         self.opponent_infos = None
 
-        return joint_observation, info
+        return joint_observation, {
+            "infos": info
+        }
 
     def send_messages(self, messages: Union[Message, Iterable[Message]]) -> None:
         """Buffer the messages from an agent to others in the same team.
@@ -301,7 +303,9 @@ class SingleTeamMultiAgent(SingleTeamHelper):
         if self.repeated_reward_individual_done:
             terminated = terminated[0]
 
-        return joint_observation, reward, terminated, truncated, infos
+        return joint_observation, reward, terminated, truncated, {
+            "infos": infos,
+        }
 
     def seed(self, seed: Optional[int] = None) -> List[int]:
         seeds = self.env.seed(seed)

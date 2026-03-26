@@ -443,7 +443,6 @@ class Viewer:
 
     def render(self) -> tuple[np.ndarray, bool]:
         self.clock.tick()
-        print(self.clock.get_fps())
 
         window = self.fixed_window.copy()
 
