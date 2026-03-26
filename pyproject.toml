@@ -23,6 +23,8 @@ dependencies = [
     "torch-summary>=1.4.5",
     "torch>=2.10.0",
     "dacite>=1.9.2",
+    "dill>=0.4.1",
+    "wandb>=0.25.1",
 ]
 
 [[tool.uv.index]]
