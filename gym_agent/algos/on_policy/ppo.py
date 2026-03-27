@@ -31,6 +31,7 @@ class PPOConfig(ActorCriticAgentConfig):
     vf_coef: float = 0.5
     entropy_coef: float = 0.001
     normalize_advantage: bool = True
+    normalize_returns: bool = True
     n_epochs: int = 4
     clip_range: float = 0.2
     target_kl: Optional[float] = None
@@ -68,6 +69,7 @@ class PPO(ActorCriticPolicyAgent):
         self.max_grad_norm = config.max_grad_norm
 
         self.normalize_advantage = config.normalize_advantage
+        self.normalize_returns = config.normalize_returns
         self.vf_coef = config.vf_coef
         self.entropy_coef = config.entropy_coef
         self.action_dist = make_proba_distribution(self.action_space)
@@ -133,6 +135,11 @@ class PPO(ActorCriticPolicyAgent):
                         advantages.std() + 1e-8
                     )
 
+                if self.normalize_returns and rollout_data.returns.numel() > 1:
+                    trained_returns = (rollout_data.returns - rollout_data.returns.mean()) / (
+                        rollout_data.returns.std() + 1e-8
+                    )
+
                 p_ratio = torch.exp(log_probs - rollout_data.log_prob)
 
                 # Actor loss
@@ -143,7 +150,8 @@ class PPO(ActorCriticPolicyAgent):
                 policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
 
                 # Critic loss
-                value_loss = F.mse_loss(rollout_data.returns.flatten(), values)
+                value_loss = F.mse_loss(trained_returns.flatten(), values)
+                value_loss = F.huber_loss(trained_returns.flatten(), values, delta=1.0)
 
                 if entropy is None:
                     # If the distribution does not have an entropy method, approximate it
