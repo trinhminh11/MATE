@@ -137,44 +137,51 @@ class ScaledDotProductAttention(AttentionBase):
         # V: (B, H, Nkv, Dv)
 
         D = Q.shape[-1]
+        scaling = 1/math.sqrt(D)
+        attn_weights = (
+            torch.matmul(
+                Q,  # (B, H, N, D)
+                K.transpose(-2, -1),  # (B, H, D, Nkv)
+            )
+            * scaling
+        )  # (B, H, N, Nkv)
 
         if causal:
-            raise NotImplementedError("Causal attention is not implemented yet")
-        else:
-            scaling = 1/math.sqrt(D)
+            causal_mask = torch.triu(torch.full((Q.shape[-2], K.shape[-2]), float("-inf")), diagonal=1).to(Q.device)
+            # causal_mask = [[0, -inf, -inf, -inf],
+            #                [0, 0, -inf, -inf],
+            #                [0, 0, 0, -inf],
+            #                [0, 0, 0, 0]]
+            attn_weights = attn_weights + causal_mask   # => (B, H, N, Nkv) + (N, Nkv) -> (B, H, N, Nkv)
 
-            attn_weights = (
-                torch.matmul(
-                    Q,  # (B, H, N, D)
-                    K.transpose(-2, -1),  # (B, H, D, Nkv)
-                )
-                * scaling
-            )  # (B, H, N, Nkv)
 
-            # if attention_mask is not None:
-            #     causal_mask = attention_mask[:, :, :, : K.shape[-2]]
-            #     attn_weights = attn_weights + causal_mask
+        attn_weights = nn.functional.softmax(
+            attn_weights, dim=-1, dtype=torch.float32
+        ).to(Q.dtype)  # (B, H, N, Nkv)
 
-            attn_weights = nn.functional.softmax(
-                attn_weights, dim=-1, dtype=torch.float32
-            ).to(Q.dtype)  # (B, H, N, Nkv)
-            attn_weights = nn.functional.dropout(
-                attn_weights, p=self.dropout, training=self.training
-            )
+        print(attn_weights)
 
-            attn_output = torch.matmul(
-                attn_weights, V
-            )  # (B, H, N, Nkv) @ (B, H, Nkv, Dv) -> (B, H, N, Dv)
 
-            return attn_output, attn_weights
+        attn_weights = nn.functional.dropout(
+            attn_weights, p=self.dropout, training=self.training
+        )
+
+
+        attn_output = torch.matmul(
+            attn_weights, V
+        )  # (B, H, N, Nkv) @ (B, H, Nkv, Dv) -> (B, H, N, Dv)
+
+        return attn_output, attn_weights
 
 
 def main():
-    B, H, L, D = 2, 4, 8, 16
-    t = torch.randn(B, H, L, D)
-    print(t.shape)
+    test_net = ScaledDotProductAttention(dropout=0.1)
 
-    print(repeat_kv(t, 3).shape)
+    Q = torch.randn(2, 4, 5, 16)  # (B=2, H=4, N=5, D=16)
+    K = torch.randn(2, 2, 5, 16)  # (B=2, Hk=2, N=5, D=16)
+    V = torch.randn(2, 1, 5, 16)  # (B=2, Hv=1, N=5, Dv=16)
+
+    out, weights = test_net(Q, K, V, causal=True)
 
 
 if __name__ == "__main__":
