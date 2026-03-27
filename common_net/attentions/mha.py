@@ -1,14 +1,15 @@
+import math
+import warnings
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
 
+from common_net.pos_embedding.base import BasePosEmbedding, IdentityPosEmbedding
+
 from ..common import Gated, ZeroCenteredRMSNorm
 from .base_attn import AttentionBase, ScaledDotProductAttention
-
-import warnings
-import math
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,8 @@ class MHAConfig:
     num_heads: int = 2
     attn_cls: type[AttentionBase] = ScaledDotProductAttention
     attn_kwargs: Optional[dict] = None
+    positional_embedding_cls: type[BasePosEmbedding] = IdentityPosEmbedding
+    positional_embedding_kwargs: Optional[dict] = None
     gated: bool = False
     gate_act_fn: str | Callable[[torch.Tensor], torch.Tensor] = "sigmoid"
     gate_operator_fn: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "*"
@@ -79,6 +82,10 @@ class MultiHeadAttention(nn.Module):
                     self.num_heads, self.num_k_heads, self.num_v_heads
                 )
             )
+
+        self.positional_embedding = config.positional_embedding_cls(
+            **(config.positional_embedding_kwargs or {})
+        )
 
         self.q_proj = nn.Linear(
             embed_dim, embed_dim, bias=config.bias, **factory_kwargs
@@ -206,6 +213,10 @@ class MultiHeadAttention(nn.Module):
         Q_proj = self.q_norm(Q_proj)  # (B, H, N, D)
         K_proj = self.k_norm(K_proj)  # (B, Hk, Nkv, D)
 
+        Q_proj = self.positional_embedding(Q_proj)  # (B, H, N, D)
+        K_proj = self.positional_embedding(K_proj)  # (B, Hk, Nkv, D)
+        # V_proj does not need positional embedding
+
         # Attention
         attn_out, attn_weights = self.attn(
             Q_proj, K_proj, V_proj, causal=causal
@@ -234,6 +245,10 @@ class MultiHeadLatentAttention(nn.Module):
     ) -> None:
         super().__init__()
 
+        raise NotImplementedError(
+            "This class is still under development, use MultiHeadAttention instead for now"
+        )
+
         if q_latent_dim is None:
             self.q_latent_dim = embed_dim // 8
         if kv_latent_dim is None:
@@ -244,14 +259,16 @@ class MultiHeadLatentAttention(nn.Module):
         head_dim = embed_dim // config.num_heads
 
         self.Wq_d = nn.Linear(embed_dim, self.q_latent_dim, bias=config.bias)
-        self.W_qk = nn.Linear(self.q_latent_dim, config.num_heads * self.kv_latent_dim, bias=config.bias)
+        self.W_qk = nn.Linear(
+            self.q_latent_dim, config.num_heads * self.kv_latent_dim, bias=config.bias
+        )
 
         self.Wkv_d = nn.Linear(embed_dim, self.kv_latent_dim, bias=config.bias)
-        self.Wv_u = nn.Linear(self.kv_latent_dim, config.num_heads * head_dim, bias=config.bias)
+        self.Wv_u = nn.Linear(
+            self.kv_latent_dim, config.num_heads * head_dim, bias=config.bias
+        )
 
         self.Wo = nn.Linear(config.num_heads * head_dim, embed_dim, bias=config.bias)
-
-
 
     def forward(
         self,
@@ -271,14 +288,25 @@ class MultiHeadLatentAttention(nn.Module):
         C_kv = self.Wkv_d(K)  # (B, Nkv, kv_latent_dim)
 
         C_qW_qk = self.W_qk(C_q)  # (B, N, H*kv_latent_dim)
-        C_qW_qk = C_qW_qk.view(B, N, self.config.num_heads, -1).transpose(1, 2)  # (B, H, N, kv_latent_dim)
+        C_qW_qk = C_qW_qk.view(B, N, self.config.num_heads, -1).transpose(
+            1, 2
+        )  # (B, H, N, kv_latent_dim)
 
-        scores = torch.matmul(C_qW_qk.transpose(1, 2), C_kv.transpose(-2, -1)[:, None, ...]) / (math.sqrt(self.kv_latent_dim))  # (B, H, N, Nkv)
+        scores = torch.matmul(
+            C_qW_qk.transpose(1, 2), C_kv.transpose(-2, -1)[:, None, ...]
+        ) / (math.sqrt(self.kv_latent_dim))  # (B, H, N, Nkv)
 
         attn_weights = torch.softmax(scores, dim=-1)  # (B, H, N, Nkv)
 
-        V_out = self.Wv_u(C_kv).view(B, Nkv, self.config.num_heads, -1).transpose(1, 2)  # (B, H, Nkv, head_dim)
+        V_out = (
+            self.Wv_u(C_kv).view(B, Nkv, self.config.num_heads, -1).transpose(1, 2)
+        )  # (B, H, Nkv, head_dim)
 
-        output = torch.matmul(attn_weights, V_out.transpose(1, 2)).transpose(1, 2).contiguous().view(B, N, -1)  # (B, H, N, head_dim) -> (B, N, H*head_dim)
+        output = (
+            torch.matmul(attn_weights, V_out.transpose(1, 2))
+            .transpose(1, 2)
+            .contiguous()
+            .view(B, N, -1)
+        )  # (B, H, N, head_dim) -> (B, N, H*head_dim)
 
         return output
