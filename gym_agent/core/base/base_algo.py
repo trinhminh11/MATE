@@ -1,5 +1,4 @@
 # Standard library imports
-import base64
 import importlib
 import pickle
 import tempfile
@@ -10,10 +9,10 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Generic, Optional, Type, TypeVar
+from typing import Any, Callable, Generic, Optional, Type
+import inspect
 
 # Third-party imports
-import dill
 import gymnasium as gym
 import numpy as np
 import torch
@@ -21,11 +20,14 @@ import torch.nn as nn
 import yaml
 from dacite import Config, from_dict
 from gymnasium import spaces
-from numpy.typing import NDArray
 from tqdm import tqdm
-import wandb
 
+# Local application imports
 import gym_agent.utils as utils
+from gym_agent.core.base.polices import BasePolicy
+from gym_agent.core.base.teachers import TeacherModel
+from gym_agent.core.buffers import BaseBuffer
+from gym_agent.core.callbacks import Callbacks
 from gym_agent.core.distributions import (
     BernoulliDistribution,
     CategoricalDistribution,
@@ -34,28 +36,31 @@ from gym_agent.core.distributions import (
     MultiCategoricalDistribution,
     make_proba_distribution,
 )
+from gym_agent.core.logger import Logger, configure
+from gym_agent.core.main import make
 from gym_agent.core.vec_env.dummy_vec_env import DummyVecEnv
 from gym_agent.core.vec_env.subproc_vec_env import SubprocVecEnv
 
-from .buffers import BaseBuffer, ReplayBuffer, RolloutBuffer
-from .callbacks import Callbacks
-from .logger import Logger, configure
-from .main import make
-from .polices import ActorCriticPolicy, BasePolicy
-from typing import Literal
+from gym_agent.core.types import ActType, ObsType
 
-ObsType = TypeVar("ObsType", NDArray, dict[str, NDArray])
-ActType = TypeVar("ActType", NDArray, dict[str, NDArray])
+def is_yaml_serializable(value, safe=True):
+    try:
+        if safe:
+            yaml.safe_dump(value)
+        else:
+            yaml.dump(value)
+        return True
+    except yaml.YAMLError:
+        return False
 
-
-def auto_find_path(path, env: str, name: str, model_version="last"):
+def auto_find_path(path, env_id: str, name: str, model_version="last"):
     """
     Automatically find the correct path given partial path information.
-    .../env/name/start_training_time/model_version*
+    .../env_id/name/start_training_time/model_version*
 
     Args:
         path (str or Path): Base path (could be incomplete).
-        env (str): Environment identifier.
+        env_id (str): Environment identifier.
         name (str): Name of the model or entity.
         model_version (str): Model version, default "last".
 
@@ -68,7 +73,7 @@ def auto_find_path(path, env: str, name: str, model_version="last"):
 
     base_path = Path(path).resolve()
 
-    env = env.strip()
+    env_id = env_id.strip()
     name = name.strip()
     model_version = model_version.strip()
 
@@ -78,19 +83,19 @@ def auto_find_path(path, env: str, name: str, model_version="last"):
 
     # Adjust path based on ending
     if (
-        base_path.parts[-2] == name and base_path.parts[-3] == env
-    ):  # .../env/name/start_time
+        base_path.parts[-2] == name and base_path.parts[-3] == env_id
+    ):  # .../env_id/name/start_time
         pass
-    elif base_path.name == name:  # .../env/name
+    elif base_path.name == name:  # .../env_id/name
         pass
-    elif base_path.name == env:  # .../env
+    elif base_path.name == env_id:  # .../env_id
         base_path = base_path / name
     else:
-        # Search recursively for env/name directory structure
-        found_paths = list(base_path.rglob(f"{env}/{name}"))
+        # Search recursively for env_id/name directory structure
+        found_paths = list(base_path.rglob(f"{env_id}/{name}"))
         if not found_paths:
             raise FileNotFoundError(
-                f"Could not find '{env}/{name}' under {base_path}"
+                f"Could not find '{env_id}/{name}' under {base_path}"
             )
         base_path = found_paths[0]  # Pick the first match (you could sort if needed)
 
@@ -104,11 +109,12 @@ def auto_find_path(path, env: str, name: str, model_version="last"):
     ]
 
     if matches:
-        matches.sort(key=lambda p: p.name, reverse=True)
+        print(matches)
+        matches.sort(key=lambda p: str(p), reverse=True)
         return matches[0]
 
     raise FileNotFoundError(
-        f"No matching file found for model_version '{model_version}' in {base_path} with env '{env}' and name '{name}'."
+        f"No matching file found for model_version '{model_version}' in {base_path} with env_id '{env_id}' and name '{name}'."
     )
 
 
@@ -162,13 +168,17 @@ class Clock:
 
 
 @dataclass(kw_only=True)
-class AgentConfig:
-    env_kwargs: Optional[dict[str, Any]] = None
+class BaseConfig:
+    env_kwargs: dict[str, Any] = None
     num_envs: int = 1
     n_steps: int = 1
     batch_size: int = 64
-    log_score_type: Literal['mean', 'sum'] = 'sum'
     async_vectorization: bool = True
+
+    distill_start = 0.5
+    distill_decay = 0.995
+    distill_final = 0
+
     device: str = "auto"
     seed: Optional[int] = None
     model_compile: bool = (
@@ -177,33 +187,16 @@ class AgentConfig:
     # WARNING: torch.compile is experimental and may not work with all models or environments
 
 
-@dataclass(kw_only=True)
-class OffPolicyAgentConfig(AgentConfig):
-    gamma: float = 0.99
-    buffer_size: int = int(1e5)
-
-
-@dataclass(kw_only=True)
-class OnPolicyAgentConfig(AgentConfig):
-    pass  # no additional parameters for now
-
-
-@dataclass(kw_only=True)
-class ActorCriticAgentConfig(AgentConfig):
-    gamma: float = 0.99
-    gae_lambda: float = 1.0
-
-
-class AgentBase(ABC, Generic[ObsType, ActType]):
+class BaseAlgorithm(ABC, Generic[ObsType, ActType]):
     memory: BaseBuffer
     envs: DummyVecEnv | SubprocVecEnv
     _logger: Logger
 
     def __init__(
         self,
-        env: str | Callable,
+        env_id: str,
         policy: BasePolicy,
-        config: AgentConfig,
+        config: BaseConfig,
         supported_action_spaces: Optional[
             tuple[type[spaces.Space], ...]
         ],  # using for algorithm define only, not for user to set
@@ -212,9 +205,9 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         Initialize the agent.
         This method sets up the agent with its environment, policy, and configuration.
         Args:
-            env (str): The ID of the environment to create.
+            env_id (str): The ID of the environment to create.
             policy (BasePolicy): The policy to use for the agent.
-            config (AgentConfig): The configuration for the agent, which includes:
+            config (BaseConfig): The configuration for the agent, which includes:
                 - env_kwargs (dict, optional): Additional arguments for environment creation.
                 - num_envs (int): Number of environments to run in parallel.
                 - async_vectorization (bool): Whether to use asynchronous environment vectorization.
@@ -226,7 +219,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
                 The action space types supported by this agent. Used for algorithm validation,
                 not for user configuration.
         Raises:
-            ValueError: If policy is not an instance of BasePolicy, env is not a string,
+            ValueError: If policy is not an instance of BasePolicy, env_id is not a string,
                        supported_action_spaces is not a tuple, or the action space of the
                        environment is not supported.
         Notes:
@@ -243,14 +236,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         self.name = self.__class__.__name__
 
-        if isinstance(env, str):
-            self.env_func = lambda **kwargs: make(env, **kwargs)  # noqa: E731
-        elif callable(env):
-            self.env_func = env
-        else:
-            raise ValueError(
-                "env must be a string or a callable function that returns an environment instance. currently not implemented for custom environments."
-            )
+        self.env_id = env_id
 
         env_kwargs = config.env_kwargs or {}
 
@@ -258,36 +244,32 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         self.env_kwargs = env_kwargs
 
-        if isinstance(self.env_func, str):
-            env_factory_fn = lambda **kwargs: make(self.env_func, **kwargs)  # noqa: E731
+        if isinstance(self.env_id, str):
+            env_factory_fn = lambda **kwargs: make(self.env_id, **kwargs)  # noqa: E731
 
+            async_vectorization = config.async_vectorization
+            if config.num_envs <= 1:
+                async_vectorization = (
+                    False  # no need to use async vectorization for single env
+                )
 
-        elif callable(self.env_func):
-            env_factory_fn = self.env_func
+            if async_vectorization:
+                self.envs = SubprocVecEnv(
+                    [
+                        lambda: env_factory_fn(**env_kwargs)
+                        for _ in range(config.num_envs)
+                    ]
+                )
+            else:
+                self.envs = DummyVecEnv(
+                    [
+                        lambda: env_factory_fn(**env_kwargs)
+                        for _ in range(config.num_envs)
+                    ]
+                )
         else:
             raise ValueError(
-                "env must be a string or a callable function that returns an environment instance. currently not implemented for custom environments."
-            )
-
-        async_vectorization = config.async_vectorization
-        if config.num_envs <= 1:
-            async_vectorization = (
-                False  # no need to use async vectorization for single env
-            )
-
-        if async_vectorization:
-            self.envs = SubprocVecEnv(
-                [
-                    lambda: env_factory_fn(**env_kwargs)
-                    for _ in range(config.num_envs)
-                ]
-            )
-        else:
-            self.envs = DummyVecEnv(
-                [
-                    lambda: env_factory_fn(**env_kwargs)
-                    for _ in range(config.num_envs)
-                ]
+                "env_id must be a string. currently not implemented for custom environments."
             )
 
         self.env_factory_fn = env_factory_fn
@@ -342,7 +324,6 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         self.scores: list[float] = []
         # keep track of each env current running score
         self.current_scores = np.zeros(self.num_envs, dtype=np.float32)
-        self.current_episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
 
         self.save_kwargs: list[str] = []
 
@@ -351,6 +332,11 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         self.start_time = None
         self.end_time = None
+
+        self.teacher_model: TeacherModel = None
+        self.distill_start = config.distill_start
+        self.distill_decay = config.distill_decay
+        self.distill_final = config.distill_final
 
         self.to(self.device)
 
@@ -454,50 +440,59 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         # Get the information to be saved
         policy_info = self.policy.save_info()
-        save_info = {
-            "config": {
-                "env": base64.b64encode(dill.dumps(self.env_func)).decode("utf-8"),
-                "config_class": f"{self.config.__class__.__module__}.{self.config.__class__.__qualname__}",
-            }
-            | asdict(self.config),
-            "training_info": {
-                "start_time": self.start_time,
-                "end_time": self.end_time,
-                "n_updates": self.n_updates,
-                "scores": self.scores,
-                "episodes": self.episodes,
-                "total_timesteps": self.timesteps,
-            },
-            "additional_info": {},
-            "model": policy_info["model"],
-            "optimizers": policy_info["optimizers"],
-            "lr_schedulers": policy_info["lr_schedulers"],
+
+        training_info = {
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "n_updates": self.n_updates,
+            "scores": self.scores,
+            "episodes": self.episodes,
+            "total_timesteps": self.timesteps,
         }
 
+        additional_info = {}
         for name in self.save_kwargs:
-            save_info["additional_info"][name] = getattr(self, name)
+            additional_info[name] = getattr(self, name)
+
+
+        config_info = {
+            "env_id": self.env_id,
+            "config_class": f"<class {self.config.__class__.__module__}.{self.config.__class__.__qualname__}>",
+        }
+
+        for key, value in asdict(self.config).items():
+            if inspect.isclass(value):
+                value = f"<class {value.__module__}.{value.__qualname__}>"
+
+            if is_yaml_serializable(value, safe=True):
+                config_info[key] = value
+            else:
+                warnings.warn(
+                    f"Config attribute '{key}' is not YAML serializable. It will be saved in additional_info.pkl."
+                )
+                config_info[key] = "__not_serializable__, may be found in additional_info.pkl"
+                additional_info[key] = value
 
         # Create a temporary directory to store files before zipping
-
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
 
             # Save files to temporary directory
-            torch.save(save_info["model"], temp_path / "model.pth")
-            torch.save(save_info["optimizers"], temp_path / "optimizers.pth")
-            torch.save(save_info["lr_schedulers"], temp_path / "lr_schedulers.pth")
+            torch.save(policy_info["model"], temp_path / "model.pth")
+            torch.save(policy_info["optimizers"], temp_path / "optimizers.pth")
+            torch.save(policy_info["lr_schedulers"], temp_path / "lr_schedulers.pth")
 
             # Save configuration as yaml
             with open(temp_path / "config.yaml", "w") as f:
-                yaml.dump(save_info["config"], f, sort_keys=False)
+                yaml.dump(config_info, f, sort_keys=False)
 
             # Save training information as yaml
             with open(temp_path / "training_info.yaml", "w") as f:
-                yaml.dump(save_info["training_info"], f, sort_keys=False)
+                yaml.dump(training_info, f, sort_keys=False)
 
             # Save additional information as pickle for non-serializable data
             with open(temp_path / "additional_info.pkl", "wb") as f:
-                pickle.dump(save_info["additional_info"], f)
+                pickle.dump(additional_info, f)
 
             # Create the zip file
             save_dir.mkdir(parents=True, exist_ok=True)
@@ -516,7 +511,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
             load_key (list[str], optional): The keys to load. If not provided, defaults to ["policy", "total_timesteps", "scores", "mean_scores", "optimizers"] + self.save_kwargs.
         """
 
-        # paths is: .../env/agent_name/time/name.pth
+        # paths is: .../env_id/agent_name/time/name.pth
 
         load_dir = Path(load_dir)
 
@@ -532,7 +527,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         )
 
     @staticmethod
-    def load_config(load_dir: Path | str) -> tuple[Callable, AgentConfig]:
+    def load_config(load_dir: Path | str) -> BaseConfig:
         """Load the agent's configuration from a file.
 
         Args:
@@ -545,22 +540,27 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         # loading configuration from yaml:
         with open(load_dir / "config.yaml", "r") as f:
             data: dict = yaml.safe_load(f)
-            if "config_class" in data and "env" in data:
+            if "config_class" in data and "env_id" in data:
                 config_class_str: str = data.pop("config_class")
-                env_func_str = data.pop("env")
+                env_id = data.pop("env_id")
 
-                # Decode the base64 encoded environment function
-                env_func_bytes = base64.b64decode(env_func_str)
-                env_func = dill.loads(env_func_bytes)
-
-
-                module_name, class_name = config_class_str.rsplit(".", 1)
+                module_name, class_name = config_class_str[7:-1].strip().rsplit(".", 1)
 
                 # Import the module
                 module = importlib.import_module(module_name)
 
                 # Get the class from the module
                 data_class = getattr(module, class_name)
+                del module_name, class_name
+
+            for key, value in data.items():
+                if isinstance(value, str):
+                    if value.startswith("__not_serializable__"):
+                        data[key] = None  # placeholder, may be found in additional_info.pkl
+                    elif value.startswith("<class ") and value.endswith(">"):
+                        module_name, class_name = value[7:-1].strip().rsplit(".", 1)
+                        module = importlib.import_module(module_name)
+                        data[key] = getattr(module, class_name)
 
             config = from_dict(
                 data_class=data_class,
@@ -568,43 +568,31 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
                 config=Config(strict=True),
             )
 
-        return env_func, config
+        return env_id, config
 
     @classmethod
     def from_checkpoint(
         cls,
+        env_id: str,
         policy: BasePolicy,
-        env_id: str | None = None,
-        filename: str | None = None,
-        path: Path | str = "./checkpoints",
+        path: Path | str,
         model_version: str = "last",
     ):
         """Create an agent from a checkpoint.
 
         Args:
-            env_id (str): The environment ID to create the agent for.
-            policy (BasePolicy): The policy to use for the agent.
             path (Path | str): The directory to load the file from.
-            model_version (str, optional): The version of the model to load. Defaults to "last".
-
+            *post_names: Additional strings to append to the filename.
 
         Returns:
             cls: The created agent.
         """
-        if filename is None and env_id is None:
-            raise ValueError(
-                "Either filename or env_id must be provided to load a checkpoint."
-            )
 
         path = Path(path)
 
-        if filename is None:
-            load_file = auto_find_path(
-                path, env=env_id, name=cls.__name__, model_version=model_version
-            )
-        else:
-            load_file = path / filename
-            load_file = load_file.with_suffix(".zip")
+        load_file = auto_find_path(
+            path, env_id=env_id, name=cls.__name__, model_version=model_version
+        )
 
         # TODO: add logging
         print(f"Loading checkpoint from {load_file}")
@@ -621,15 +609,15 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
             load_dir = temp_path
 
             # loading configuration from yaml:
-            config_env_func, config = cls.load_config(load_dir)
-            # if config_env != env_id:
-            #     warnings.warn(
-            #         f"Warning: env in config ({config_env}) does not match the provided env ({env_id}). Using the config env."
-            #     )
-            #     env_id = config_env_func
+            config_env_id, config = cls.load_config(load_dir)
+            if config_env_id != env_id:
+                warnings.warn(
+                    f"Warning: env_id in config ({config_env_id}) does not match the provided env_id ({env_id}). Using the config env_id."
+                )
+                env_id = config_env_id
 
             # Create the agent instance
-            agent = cls(env=config_env_func, policy=policy, config=config)
+            agent = cls(env_id=env_id, policy=policy, config=config)
             # Load the model parameters
             agent.load_model(load_dir)
 
@@ -662,6 +650,38 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         """
         ...
 
+    @property
+    def distill_coef(self):
+        return max(
+            self.distill_start * self.distill_decay**self.n_updates, self.distill_final
+        )
+
+    def set_teacher_model(self, teacher_model: TeacherModel):
+        if not isinstance(teacher_model, TeacherModel):
+            raise ValueError("teacher_model must be an instance of TeacherModel")
+        self.teacher_model = teacher_model
+
+    def maybe_distill_loss(
+        self,
+        base_loss: torch.Tensor,
+        actions: torch.Tensor,
+        action_logits: torch.Tensor,
+        action_probs: torch.Tensor,
+        observations: ObsType,
+    ) -> torch.Tensor:
+        if self.teacher_model is None:
+            return base_loss
+        else:
+            with torch.no_grad():  # to ensure if teacher_model is nn.Module
+                distill_loss = self.teacher_model.calc_loss(
+                    observations=observations,
+                    student_actions=actions,
+                    student_action_logits=action_logits,
+                    student_action_probs=action_probs,
+                )
+
+            return base_loss + self.distill_coef * distill_loss
+
     @abstractmethod
     def predict(self, observations: ObsType, deterministic: bool = True) -> ActType:
         """
@@ -686,7 +706,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         raise NotImplementedError
 
     @abstractmethod
-    def learn(self, wandb_run: Optional[wandb.Run] = None) -> None:
+    def learn(self) -> None:
         raise NotImplementedError
 
     def _setup_fit(
@@ -732,7 +752,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         save_dir: Path = (
             Path(save_dir)
-            / self.envs.env_id
+            / self.env_id
             / self.name
             / train_begin.strftime("%Y-%m-%d_%H-%M-%S")
         )
@@ -740,7 +760,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
         log_dir: Path = (
             Path(log_dir)
-            / self.envs.env_id
+            / self.env_id
             / self.name
             / train_begin.strftime("%Y-%m-%d_%H-%M-%S")
         )
@@ -768,7 +788,6 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         log_interval: int = 1,
         progress_bar: Optional[Type[tqdm]] = tqdm,
         callbacks: Type[Callbacks] = None,
-        wandb_api: str = None
     ):
         """
         Train the agent for a certain number of timesteps.
@@ -807,12 +826,6 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         last_best_score = None
 
         iteration = 0
-
-        if wandb_api is not None:
-            wandb.login(key=wandb_api)
-            wandb_run = wandb.init(project=wandb_api, name=self.envs.env_id)
-        else:
-            wandb_run = None
 
         while True:
             self.reset()
@@ -886,7 +899,7 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
             if len(self.memory) > self.batch_size:
                 callbacks.on_learn_begin()
-                self.learn(wandb_run)
+                self.learn()
                 callbacks.on_learn_end()
                 self.n_updates += 1
 
@@ -907,21 +920,6 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
                 self.scores[-1] if len(self.scores) > 0 else None,
             )
 
-            if wandb_run is not None:
-                wandb_run.log(
-                    {
-                        "time/iterations": iteration,
-                        "time/total_timesteps": self.timesteps,
-                        "time/episodes": self.episodes,
-                        "time/n_updates": self.n_updates,
-                        "time/time_elapsed": time_elapsed,
-                        "time/fps": fps,
-                        "rollout/avg_score": avg_score,
-                        "rollout/score": self.scores[-1] if len(self.scores) > 0 else None,
-                    },
-                    step=self.timesteps,
-                )
-
             if log_interval > 0 and iteration % log_interval == 0:
                 self.logger.dump(iteration)
 
@@ -929,14 +927,11 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
             save_dir, f"last_{np.mean(self.scores[-self._mean_score_window :]):.2f}"
         )
 
-        if wandb_api is not None:
-            wandb_run.finish()
-
         callbacks.on_train_end()
         self.end_time = datetime.now().timestamp()
         self.logger.close()
 
-    def run_episode(
+    def play(
         self,
         # env: EnvWithTransform = None,
         env_kwargs: dict[str, Any] = None,
@@ -946,18 +941,17 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
         deterministic=True,
         seed=None,
         options: Optional[dict[str, Any]] = None,
-        render: bool = False,
         jupyter: bool = False,
     ):
-        if render:
-            if jupyter:
-                from IPython.display import (
-                    display,  # pyright: ignore[reportMissingModuleSource] # type
-                )
-                from PIL import Image
-            else:
-                import pygame
-                pygame.init()
+        if jupyter:
+            from IPython.display import (
+                display,  # pyright: ignore[reportMissingModuleSource] # type
+            )
+            from PIL import Image
+        else:
+            import pygame
+
+            pygame.init()
 
         # _env_kwargs = self.env_kwargs | {"render_mode": "rgb_array" if jupyter else "human", "max_episode_steps": max_episode_steps}
 
@@ -992,22 +986,17 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
                     break
 
                 clock.tick(FPS)
-                if render:
-                    pixel = env.render()
+                pixel = env.render()
 
-                    if jupyter:
-                        display(Image.fromarray(pixel), clear=True)
+                if jupyter:
+                    display(Image.fromarray(pixel), clear=True)
 
                 if isinstance(env.observation_space, gym.spaces.Dict):
                     _obs = {key: np.expand_dims(obs[key], 0) for key in obs}
                 else:
                     _obs = np.expand_dims(obs, 0)
 
-                if score == 0:
-                    action = env.action_space.sample()
-                    action = np.ones([1, *action.shape])  # ensure the action has batch dimension
-                else:
-                    action = self.predict(_obs, deterministic)
+                action = self.predict(_obs, deterministic)
 
                 next_obs, reward, terminated, truncated, info = env.step(action[0])
 
@@ -1017,44 +1006,15 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
 
                 score += reward
 
-                if not jupyter and render:
+                if not jupyter:
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
                             done = True
 
-        if not jupyter and render:
+        if not jupyter:
             pygame.quit()
 
-        return {
-            "score": score,
-            "timesteps": time_step,
-            "last_info": info,
-        }
-
-    def play(
-        self,
-        # env: EnvWithTransform = None,
-        env_kwargs: dict[str, Any] = None,
-        max_episode_steps: int = None,
-        FPS: int = 30,
-        stop_if_truncated: bool = True,
-        deterministic=True,
-        seed=None,
-        options: Optional[dict[str, Any]] = None,
-        jupyter: bool = False,
-    ):
-
-        return self.run_episode(
-            env_kwargs,
-            max_episode_steps,
-            FPS,
-            stop_if_truncated,
-            deterministic,
-            seed,
-            options,
-            render=True,
-            jupyter=jupyter,
-        )
+        return score, info
 
     def play_jupyter(
         self,
@@ -1094,258 +1054,3 @@ class AgentBase(ABC, Generic[ObsType, ActType]):
             return self.action_dist.proba_distribution(action_logits=action_logits)
         else:
             raise ValueError("Invalid action distribution")
-
-
-class OffPolicyAgent(AgentBase[ObsType, ActType]):
-    memory: ReplayBuffer
-
-    def __init__(
-        self,
-        env: str,
-        policy: BasePolicy,
-        config: OffPolicyAgentConfig = None,
-        supported_action_spaces: Optional[tuple[type[spaces.Space], ...]] = None,
-    ):
-        config = config if config is not None else OffPolicyAgentConfig()
-        super().__init__(
-            env=env,
-            policy=policy,
-            config=config,
-            supported_action_spaces=supported_action_spaces,
-        )
-
-        self.gamma = config.gamma
-
-        self.memory = ReplayBuffer(
-            buffer_size=config.buffer_size,
-            observation_space=self.observation_space,
-            action_space=self.action_space,
-            device=self.device,
-            num_envs=self.num_envs,
-            seed=self.seed,
-        )
-
-    @abstractmethod
-    def learn(
-        self,
-        wandb_run: Optional[wandb.Run] = None
-
-    ) -> None:
-        """
-        Abstract method to be implemented by subclasses for learning from a batch of experiences.
-        use self.memory.sample(self.batch_size) to get a batch of experiences.
-        """
-        ...
-
-    def collect_buffer(
-        self, deterministic: bool, callbacks: Type[Callbacks]
-    ) -> tuple[int, int]:
-        # TODO: this is not an episode, so the callbacks should be different
-        callbacks.on_episode_begin()
-
-        time_steps = 0
-        episodes = 0
-
-        self.policy.train()  # ensure in train mode
-        for _ in range(self.n_steps):
-            time_steps += 1
-
-            with torch.no_grad():
-                actions = self.predict(self._last_obs, deterministic)
-            next_obs, rewards, terminated, truncated, info = self.envs.step(actions)
-
-            self.memory.add(self._last_obs, actions, rewards, terminated)
-
-            self._last_obs = next_obs
-            self._last_episode_starts = np.array(
-                terminated | truncated
-            )  # episode starts is just done
-
-            self.current_scores += np.array(rewards, dtype=np.float32)
-            self.current_episode_lengths += 1
-
-            # if an env is done, record the score and reset the current score for that env
-            if self.config.log_score_type == 'mean':
-                self.scores.extend(
-                    (self.current_scores[self._last_episode_starts] / self.current_episode_lengths[self._last_episode_starts]).tolist()
-                )
-            elif self.config.log_score_type == 'sum':
-                self.scores.extend(self.current_scores[self._last_episode_starts].tolist())
-            # reset the current score for that env
-            self.current_scores[self._last_episode_starts] = 0.0
-            self.current_episode_lengths[self._last_episode_starts] = 0
-            # count how many episodes finished
-            episodes += np.sum(self._last_episode_starts)
-
-        # TODO: this is not an episode, so the callbacks should be different
-        callbacks.on_episode_end()
-
-        return time_steps, int(episodes)
-
-
-class OnPolicyAgent(AgentBase[ObsType, ActType]):
-    """
-    This is a base class for on-policy agents.
-    Because there are on-policy agents that are not actor-critic, so this is a placeholder for the future on-policy implementations if they arise.
-    """
-
-    pass
-
-
-class ActorCriticPolicyAgent(AgentBase[ObsType, ActType]):
-    """This is a base class for actor-critic agents.
-    You can consider this class as an on-policy agent with a value function.
-    """
-
-    memory: RolloutBuffer
-    policy: ActorCriticPolicy
-
-    def __init__(
-        self,
-        env: str,
-        policy: ActorCriticPolicy,
-        config: ActorCriticAgentConfig = None,
-        supported_action_spaces: Optional[tuple[type[spaces.Space], ...]] = None,
-    ):
-        config = config if config is not None else ActorCriticAgentConfig()
-        super().__init__(
-            env=env,
-            policy=policy,
-            config=config,
-            supported_action_spaces=supported_action_spaces,
-        )
-
-        self.memory = RolloutBuffer(
-            buffer_size=self.n_steps,
-            observation_space=self.observation_space,
-            action_space=self.action_space,
-            device=self.device,
-            num_envs=self.num_envs,
-            gamma=config.gamma,
-            gae_lambda=config.gae_lambda,
-            seed=self.seed,
-        )
-
-        self._last_obs = None
-
-    @abstractmethod
-    def predict(self, state: ObsType, deterministic: bool = True) -> ActType:
-        pass
-
-    @abstractmethod
-    def learn(self, wandb_run: Optional[wandb.Run] = None) -> None:
-        """
-        Perform learning using the experiences stored in the memory buffer.
-
-        This method should be overridden by subclasses to implement specific learning algorithms.
-        The method should utilize the experiences stored in `self.memory` to update the agent's policy.
-        use self.memory.get(batch_size) to get a generator that yields batches of experiences.
-        """
-        raise NotImplementedError
-
-    def evaluate_actions(
-        self, obs: ObsType, actions: ActType
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Evaluate actions using the current policy.
-
-        Args:
-            obs (ObsType): The input observations which can be either a numpy array or a dictionary
-                * ``NDArray`` shape - `[batch, *obs_shape]`
-                * ``dict`` shape - `[key: sub_space]` with `sub_space` shape: `[batch, *sub_obs_shape]`
-            actions (ActType): The actions to evaluate which can be either a numpy array or a dictionary
-                * ``NDArray`` shape - `[batch, *action_shape]`
-                * ``dict`` shape - `[key: sub_space]` with `sub_space` shape: `[batch, *sub_action_shape]`
-        Returns:
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple containing:
-                - values (torch.Tensor): The value estimates for the observations.
-                - action_log_probs (torch.Tensor): The log probabilities of the actions.
-                - entropy (torch.Tensor): The entropy of the action distribution.
-        """
-        action_logits, value_logits = self.policy.forward(obs)
-        values = value_logits.squeeze(-1)
-
-        distribution = self.distribution(action_logits)
-        action_log_probs = distribution.log_prob(actions)
-        entropy = distribution.entropy()
-
-        return values, action_log_probs, entropy
-
-    def collect_buffer(self, deterministic: bool, callbacks: Type[Callbacks] = None):
-        # TODO: this is not an episode, so the callbacks should be different
-        callbacks.on_episode_begin()
-
-        self.memory.reset()
-
-        time_steps = 0
-        episodes = 0
-
-        self.policy.train()  # ensure in train mode
-        for _ in range(self.n_steps):
-            time_steps += 1
-
-            with torch.no_grad():
-                action_logits, value_logits = self.policy.forward(
-                    utils.to_torch(self._last_obs, self.device, torch.float32)
-                )
-
-                distribution = self.distribution(action_logits)
-
-                # get the action
-                if deterministic:
-                    actions = distribution.mode()
-                else:
-                    actions = distribution.sample()
-
-                log_probs = distribution.log_prob(actions).cpu().numpy()
-                actions = actions.cpu().numpy()
-                values = value_logits.squeeze(-1).cpu().numpy()
-
-            next_obs, rewards, terminated, truncated, info = self.envs.step(actions)
-
-            self.memory.add(
-                self._last_obs,
-                actions,
-                rewards,
-                values,
-                log_probs,
-                self._last_episode_starts,
-            )
-
-            self._last_obs = next_obs
-            self._last_episode_starts = np.array(
-                terminated | truncated
-            )  # episode starts is just done
-
-            self.current_scores += np.array(rewards, dtype=np.float32)
-            self.current_episode_lengths += 1
-
-            # if an env is done, record the score and reset the current score for that env
-            if self.config.log_score_type == 'mean':
-                self.scores.extend(
-                    (self.current_scores[self._last_episode_starts] / self.current_episode_lengths[self._last_episode_starts]).tolist()
-                )
-            elif self.config.log_score_type == 'sum':
-                self.scores.extend(self.current_scores[self._last_episode_starts].tolist())
-            # reset the current score for that env
-            self.current_scores[self._last_episode_starts] = 0.0
-            self.current_episode_lengths[self._last_episode_starts] = 0
-            # count how many episodes finished
-            episodes += np.sum(self._last_episode_starts)
-
-        # compute the value of the last observation
-        with torch.no_grad():
-            values = (
-                self.policy.forward_critic(utils.to_torch(self._last_obs, self.device, torch.float32))
-                .squeeze(-1)
-                .cpu()
-                .numpy()
-            )
-
-        self.memory.calc_advantages_and_returns(
-            last_values=values, last_terminals=self._last_episode_starts
-        )
-
-        # TODO: this is not an episode, so the callbacks should be different
-        callbacks.on_episode_end()
-
-        return time_steps, int(episodes)
