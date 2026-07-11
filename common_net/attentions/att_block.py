@@ -89,7 +89,7 @@ class MAB(AttnBlock):
         self.ff_norm = norm_cls(embed_dim, **norm_kwargs)
 
         if moe_cls is not None:
-            self.ff = moe_cls(embed_dim=embed_dim, d_ff=d_ff, config=moe_config)
+            self.ff: nn.Module = moe_cls(embed_dim=embed_dim, d_ff=d_ff, config=moe_config)
         else:
             self.ff = GatedMLP(embed_dim, d_ff)
 
@@ -167,7 +167,7 @@ class CrossMAB(AttnBlock):
         self.ff_norm = norm_cls(embed_dim, **norm_kwargs)
 
         if moe_cls is not None:
-            self.ff = moe_cls(embed_dim=embed_dim, d_ff=d_ff, config=moe_config)
+            self.ff: nn.Module = moe_cls(embed_dim=embed_dim, d_ff=d_ff, config=moe_config)
         else:
             self.ff = GatedMLP(embed_dim, d_ff)
 
@@ -195,7 +195,7 @@ class CrossMAB(AttnBlock):
 
         out = hidden_states + ff_out  # Residual (B, N, E)
 
-        return out, attn_weights
+        return out
 
 
 class ISAB(AttnBlock):

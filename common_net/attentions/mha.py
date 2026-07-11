@@ -14,7 +14,7 @@ from .base_attn import AttentionBase, ScaledDotProductAttention
 
 @dataclass(frozen=True)
 class MHAConfig:
-    num_heads: int = 2
+    num_heads: int = 1
     attn_cls: type[AttentionBase] = ScaledDotProductAttention
     attn_kwargs: Optional[dict] = None
     positional_embedding_cls: type[BasePosEmbedding] = IdentityPosEmbedding

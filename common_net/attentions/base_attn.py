@@ -159,8 +159,6 @@ class ScaledDotProductAttention(AttentionBase):
             attn_weights, dim=-1, dtype=torch.float32
         ).to(Q.dtype)  # (B, H, N, Nkv)
 
-        print(attn_weights)
-
 
         attn_weights = nn.functional.dropout(
             attn_weights, p=self.dropout, training=self.training
